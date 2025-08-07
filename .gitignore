@@ -1,2 +1,10 @@
 # Arquivos específicos do VSCode
 .vscode/
+.github/
+
+# Claude files
+.claude/
+
+# Output files
+*.csv
+*.mp4
