@@ -74,22 +74,31 @@ fator_liq = 0.015         # Fator de liquidez (1.5% do volume)
 Para ajustar curvas NSS em um período específico:
 
 ```bash
-julia fit_curvas.jl
+julia fit_curvas.jl --start 2024-01-01 --end 2024-12-31
 ```
 
-**Exemplo personalizado:**
-```julia
-# Modifique as datas padrão em fit_curvas.jl:
-function get_default_args()
-    return Dict(
-        "start" => "2024-01-01",    # Data inicial
-        "end" => "2024-12-31",      # Data final
-        "output" => "curvas_nss",   # Prefixo do arquivo
-        "continuity" => true,       # Usar continuidade temporal
-        "verbose" => true,          # Mostrar progresso
-        "dry-run" => false          # false = executar, true = apenas testar
-    )
-end
+**Opções disponíveis:**
+```bash
+julia fit_curvas.jl --start YYYY-MM-DD --end YYYY-MM-DD [opções]
+
+--start          Data inicial (YYYY-MM-DD) [padrão: 2024-01-01]
+--end            Data final (YYYY-MM-DD) [padrão: 2024-12-31]  
+--output         Prefixo do arquivo de saída [padrão: curvas_nss]
+--continuity     Usar continuidade temporal [padrão: true]
+--verbose        Mostrar progresso detalhado [padrão: true]
+--dry-run        Apenas validar configuração, não executar
+```
+
+**Exemplos:**
+```bash
+# Ajustar todo o ano de 2024
+julia fit_curvas.jl --start 2024-01-01 --end 2024-12-31
+
+# Apenas primeiro trimestre de 2024
+julia fit_curvas.jl --start 2024-01-01 --end 2024-03-31
+
+# Teste de configuração sem executar
+julia fit_curvas.jl --start 2024-01-01 --end 2024-01-31 --dry-run
 ```
 
 **O que faz:**
@@ -179,7 +188,7 @@ O sistema baixa automaticamente dados do BACEN quando necessário, mas você pod
 julia run_continuous_walkforward_cv.jl
 
 # 2. Ajustar curvas para 2024
-julia fit_curvas.jl
+julia fit_curvas.jl --start 2024-01-01 --end 2024-12-31
 
 # 3. Criar animação
 julia create_yield_curve_animation.jl curvas_nss_2024-01-01_12-00-00.csv animacao_2024.mp4
