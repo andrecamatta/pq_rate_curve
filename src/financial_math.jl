@@ -30,16 +30,23 @@ Returns:
 - Interest rate as a decimal (e.g., 0.10 for 10%)
 """
 function nss_rate(t, p)
+    # Handle the limit for t -> 0 to avoid numerical instability
+    if t < 1e-6
+        return p[1] + p[2]
+    end
+
     # Evita divisão por zero e garante positividade dos taus
     tau1 = max(abs(p[5]), 0.005)
     tau2 = max(abs(p[6]), 0.005)
     
-    # Componentes Nelson-Siegel originais
-    lambda1 = (1 - exp(-t/tau1)) / (t/tau1)
-    lambda2 = lambda1 - exp(-t/tau1)
+    val1 = t / tau1
+    val2 = t / tau2
+
+    lambda1 = (1 - exp(-val1)) / val1
+    lambda2 = lambda1 - exp(-val1)
     
     # Componente Svensson adicional
-    lambda3 = (1 - exp(-t/tau2)) / (t/tau2) - exp(-t/tau2)
+    lambda3 = (1 - exp(-val2)) / val2 - exp(-val2)
     
     # Soma ponderada dos componentes
     rate = p[1] + p[2] * lambda1 + p[3] * lambda2 + p[4] * lambda3
@@ -54,7 +61,7 @@ end
 """
     price_bond(cash_flow::Vector, ref_date::Date, params::Vector{Float64}) -> Float64
 
-Price a bond using Nelson-Siegel-Svensson yield curve.
+Price a bond using Nelson-Siegel-Svensson yield curve with continuous compounding.
 
 Parameters:
 - cash_flow: Vector of (date, amount) tuples representing bond cash flows
@@ -70,7 +77,7 @@ function price_bond(cash_flow, ref_date, params)
         t = yearfrac(ref_date, date)
         if t > 0  # Apenas fluxos futuros
             rate = nss_rate(t, params)
-            price += amount / (1 + rate)^t
+            price += amount * exp(-rate * t) # Continuous compounding
         end
     end
     return price
@@ -79,7 +86,7 @@ end
 """
     price_bond_precalc(cash_flow_with_times::Vector, params::Vector{Float64}) -> Float64
 
-Price a bond using pre-calculated time fractions for performance optimization.
+Price a bond using pre-calculated time fractions for performance optimization with continuous compounding.
 
 Parameters:
 - cash_flow_with_times: Vector of (time_fraction, amount) tuples
@@ -93,7 +100,7 @@ function price_bond_precalc(cash_flow_with_times, params)
     for (t, amount) in cash_flow_with_times
         if t > 0
             rate = nss_rate(t, params)
-            price += amount / (1 + rate)^t
+            price += amount * exp(-rate * t) # Continuous compounding
         end
     end
     return price
@@ -102,7 +109,7 @@ end
 """
     calculate_duration(cash_flow::Vector, ref_date::Date, params::Vector{Float64}) -> Float64
 
-Calculate modified duration of a bond using NSS yield curve.
+Calculate Macaulay duration of a bond using NSS yield curve (equivalent to modified duration with continuous compounding).
 
 Parameters:
 - cash_flow: Vector of (date, amount) tuples representing bond cash flows
@@ -110,7 +117,7 @@ Parameters:
 - params: NSS parameters vector
 
 Returns:
-- Modified duration in years
+- Macaulay duration in years
 """
 function calculate_duration(cash_flow, ref_date, params)
     bond_price = price_bond(cash_flow, ref_date, params)
@@ -124,7 +131,7 @@ function calculate_duration(cash_flow, ref_date, params)
         t = yearfrac(ref_date, date)
         if t > 0
             rate = nss_rate(t, params)
-            pv = amount / (1 + rate)^t
+            pv = amount * exp(-rate * t) # Continuous compounding for PV
             duration += (t * pv) / bond_price
         end
     end
@@ -135,14 +142,14 @@ end
 """
     calculate_duration_precalc(cash_flow_with_times::Vector, params::Vector{Float64}) -> Float64
 
-Calculate modified duration using pre-calculated time fractions for performance.
+Calculate Macaulay duration using pre-calculated time fractions for performance.
 
 Parameters:
 - cash_flow_with_times: Vector of (time_fraction, amount) tuples
 - params: NSS parameters vector
 
 Returns:
-- Modified duration in years
+- Macaulay duration in years
 """
 function calculate_duration_precalc(cash_flow_with_times, params)
     bond_price = price_bond_precalc(cash_flow_with_times, params)
@@ -155,7 +162,7 @@ function calculate_duration_precalc(cash_flow_with_times, params)
     for (t, amount) in cash_flow_with_times
         if t > 0
             rate = nss_rate(t, params)
-            pv = amount / (1 + rate)^t
+            pv = amount * exp(-rate * t) # Continuous compounding for PV
             duration += (t * pv) / bond_price
         end
     end
@@ -166,7 +173,7 @@ end
 """
     calculate_ytm(market_price::Float64, cash_flow::Vector, ref_date::Date) -> Float64
 
-Calculate yield to maturity (TIR) of a bond given its market price.
+Calculate continuously compounded yield to maturity (YTM) of a bond given its market price.
 
 Parameters:
 - market_price: Market price of the bond
@@ -174,38 +181,45 @@ Parameters:
 - ref_date: Reference date for calculation
 
 Returns:
-- Yield to maturity as a decimal
+- Continuously compounded yield to maturity as a decimal
 """
 function calculate_ytm(market_price, cash_flow, ref_date)
-    # For zero-coupon bonds (LTN), direct calculation
+    # For zero-coupon bonds (LTN), direct calculation for continuously compounded YTM
     if length(cash_flow) == 1
         maturity_date, face_value = cash_flow[1]
         t = yearfrac(ref_date, maturity_date)
-        return (face_value / market_price)^(1/t) - 1
+        if t <= 0 || market_price <= 0
+            return 0.0
+        end
+        # YTM = (1/t) * ln(FV/PV)
+        return log(face_value / market_price) / t
     end
     
-    # For coupon bonds, use iterative method
-    function bond_price(ytm)
+    # For coupon bonds, use iterative method with continuous compounding
+    function bond_price_cont(ytm)
         price = 0.0
         for (date, amount) in cash_flow
             t = yearfrac(ref_date, date)
-            price += amount / (1 + ytm)^t
+            if t > 0
+                price += amount * exp(-ytm * t)
+            end
         end
         return price
     end
     
     # Bisection method to find YTM
-    ytm_low = 0.001   # 0.1%
+    ytm_low = -0.10  # YTM can be negative
     ytm_high = 0.50   # 50%
     
     for _ in 1:100  # maximum 100 iterations
         ytm_mid = (ytm_low + ytm_high) / 2
-        price_mid = bond_price(ytm_mid)
+        price_mid = bond_price_cont(ytm_mid)
         
-        if abs(price_mid - market_price) < 0.001  # tolerance of R$ 0.001
+        if abs(price_mid - market_price) < 0.0001
             return ytm_mid
         end
         
+        # Price is a decreasing function of ytm
         if price_mid > market_price
             ytm_low = ytm_mid
         else

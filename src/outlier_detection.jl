@@ -7,6 +7,9 @@ Median Absolute Deviation (MAD) and liquidity criteria.
 
 using Statistics
 
+# Include dependencies
+include("financial_math.jl")
+
 """
     calculate_mad(values::Vector{Float64}) -> Float64
 
@@ -20,7 +23,7 @@ Returns:
 - MAD value
 """
 function calculate_mad(values::Vector{Float64})
-    if isempty(values)
+    if isempty(values) || length(values) < 2
         return 0.0
     end
     
@@ -30,28 +33,22 @@ function calculate_mad(values::Vector{Float64})
 end
 
 """
-    detect_outliers_mad_and_liquidity(cash_flows, bond_quantities, ref_date, params; 
-                                     fator_erro=3.0, fator_liq=0.1) -> (Vector{Int}, Vector{Float64}, Float64)
+    detect_outliers_mad(cash_flows, ref_date, params; fator_erro=3.0) -> (Vector{Int}, Vector{Float64}, Float64)
 
-Detect outliers based on TWO simultaneous conditions:
-1. Error > fator_erro × MAD
-2. Trading quantity < fator_liq % of total
+Detect outliers based on pricing error using the Median Absolute Deviation (MAD) method.
 
 Parameters:
 - cash_flows: List of (market_price, cash_flow) tuples
-- bond_quantities: Vector with corresponding trading quantities
 - ref_date: Reference date
 - params: Current NSS parameters
 - fator_erro: MAD multiplier for outlier classification (default: 3.0)
-- fator_liq: Percentage of total quantity (default: 0.1 = 10%)
 
 Returns:
 - outlier_indices: Indices of bonds classified as outliers
 - errors: Vector with pricing errors for all bonds
 - mad_value: Calculated MAD value
 """
-function detect_outliers_mad_and_liquidity(cash_flows, bond_quantities, ref_date, params; 
-                                          fator_erro=3.0, fator_liq=0.1)
+function detect_outliers_mad(cash_flows, ref_date, params; fator_erro=3.0)
     if isempty(cash_flows)
         return Int[], Float64[], 0.0
     end
@@ -64,27 +61,18 @@ function detect_outliers_mad_and_liquidity(cash_flows, bond_quantities, ref_date
         push!(errors, error_abs)
     end
     
-    # Calculate MAD of errors
     mad_value = calculate_mad(errors)
+    # If MAD is zero (e.g., all errors are the same), avoid division by zero or removing everything
+    if mad_value < 1e-6
+        return Int[], errors, mad_value
+    end
+
     error_threshold = fator_erro * mad_value
     
-    # Calculate liquidity threshold
-    total_quantity = sum(bond_quantities)
-    liquidity_threshold = fator_liq * total_quantity
-    
-    # Identify outliers that satisfy BOTH conditions
+    # Identify outliers based on error ONLY
     outlier_indices = Int[]
     for (i, error) in enumerate(errors)
-        quantity = bond_quantities[i]
-        
-        # Condition 1: High error
-        high_error = error > error_threshold
-        
-        # Condition 2: Low liquidity
-        low_liquidity = quantity < liquidity_threshold
-        
-        # Outlier only if BOTH conditions are true
-        if high_error && low_liquidity
+        if error > error_threshold
             push!(outlier_indices, i)
         end
     end

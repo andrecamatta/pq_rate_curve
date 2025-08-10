@@ -9,81 +9,13 @@ using Random, LsqFit, HTTP, JSON, LinearAlgebra, Statistics
 
 # --- Includes ---
 include("financial_math.jl")
+include("outlier_detection.jl") # Added to access outlier functions
 
 # --- Funções de Otimização e Estimação ---
 
-"""
-    remove_outliers(cash_flows, bond_quantities, outlier_indices) -> (Vector, Vector)
-
-Remove outliers from cash flows and bond quantities arrays.
-"""
-function remove_outliers(cash_flows, bond_quantities, outlier_indices)
-    if isempty(outlier_indices)
-        return cash_flows, bond_quantities
-    end
-    
-    # Create mask for non-outliers
-    n = length(cash_flows)
-    keep_mask = trues(n)
-    keep_mask[outlier_indices] .= false
-    
-    # Filter arrays
-    filtered_cash_flows = cash_flows[keep_mask]
-    filtered_quantities = bond_quantities[keep_mask]
-    
-    return filtered_cash_flows, filtered_quantities
-end
-
-
-"""
-    detect_outliers_mad_and_liquidity(cash_flows, bond_quantities, ref_date, params; 
-                                     fator_erro=3.0, fator_liq=0.1) -> (Vector{Int}, Vector{Float64}, Float64)
-
-Detect outliers based on TWO simultaneous conditions:
-1. Error > fator_erro × MAD  
-2. Trading quantity < fator_liq % of total
-"""
-function detect_outliers_mad_and_liquidity(cash_flows, bond_quantities, ref_date, params; 
-                                          fator_erro=3.0, fator_liq=0.1)
-    if isempty(cash_flows)
-        return Int[], Float64[], 0.0
-    end
-    
-    # Calculate pricing errors for all bonds
-    errors = Float64[]
-    for (market_price, cash_flow) in cash_flows
-        theoretical_price = price_bond(cash_flow, ref_date, params)
-        error_abs = abs(theoretical_price - market_price)
-        push!(errors, error_abs)
-    end
-    
-    # Calculate MAD of errors
-    mad_value = calculate_mad(errors)
-    error_threshold = fator_erro * mad_value
-    
-    # Calculate liquidity threshold
-    total_quantity = sum(bond_quantities)
-    liquidity_threshold = fator_liq * total_quantity
-    
-    # Identify outliers that satisfy BOTH conditions
-    outlier_indices = Int[]
-    for (i, error) in enumerate(errors)
-        quantity = bond_quantities[i]
-        
-        # Condition 1: High error
-        high_error = error > error_threshold
-        
-        # Condition 2: Low liquidity
-        low_liquidity = quantity < liquidity_threshold
-        
-        # Outlier only if BOTH conditions are true
-        if high_error && low_liquidity
-            push!(outlier_indices, i)
-        end
-    end
-    
-    return outlier_indices, errors, mad_value
-end
+# Note: The functions remove_outliers and the original detect_outliers_mad_and_liquidity
+# have been removed from this file to eliminate duplication.
+# They are now centralized in outlier_detection.jl.
 
 # Global cache for SELIC rates
 const SELIC_CACHE = Dict{Date, Float64}()
@@ -252,7 +184,7 @@ function optimize_pso_nss(cash_flows, ref_date;
             temporal_penalty *= temporal_penalty_weight
         end
         
-        # Pricing error - usando EXATAMENTE a mesma metodologia do LM
+        # Pricing error - using continuous compounding
         total_cost = 0.0
         total_weight = 0.0
         
@@ -261,19 +193,23 @@ function optimize_pso_nss(cash_flows, ref_date;
                 continue
             end
 
-            # Pre-calculated theoretical price
-            theoretical_price = sum(amount / (1 + nss_rate(t, params))^t for (t, amount) in cf_with_times if t > 0)
+            # Pre-calculated theoretical price with continuous compounding
+            theoretical_price = sum(amount * exp(-nss_rate(t, params) * t) for (t, amount) in cf_with_times if t > 0)
 
             # Handle potential invalid price calculation
             if isnan(theoretical_price) || isinf(theoretical_price) || theoretical_price <= 0.0
                 return 1e12 # Add a large penalty and continue
             end
 
-            # Duration-based weighting (pre-calculated)
-            duration = sum(t * amount / (1 + nss_rate(t, params))^t for (t, amount) in cf_with_times if t > 0) / theoretical_price
-            weight = 1.0 / sqrt(max(duration, 0.1))  # Peso ANBIMA suave (raiz quadrada)
+            # Duration-based weighting (pre-calculated) with continuous compounding
+            if theoretical_price > 0
+                duration = sum(t * amount * exp(-nss_rate(t, params) * t) for (t, amount) in cf_with_times if t > 0) / theoretical_price
+            else
+                duration = 0.1 # Fallback for invalid price
+            end
+            weight = 1.0 / sqrt(max(duration, 0.1))
             
-            # Erro absoluto em preço quadrático ponderado (igual ao LM)
+            # Weighted squared pricing error
             error_abs = theoretical_price - market_price
             total_cost += weight * error_abs^2
             total_weight += weight
@@ -395,17 +331,25 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params;
                                              verbose::Bool=true)
 
     if verbose
-        println("🔧 Aplicando refinamento Levenberg-Marquardt com função de custo unificada...")
+        println("🔧 Aplicando refinamento Levenberg-Marquardt via LsqFit.jl...")
     end
     
     selic_rate = get_selic_rate(ref_date; verbose=verbose)
     temporal_vertices = [0.5, 1.0, 3.0, 5.0, 10.0]
 
+    # The residuals function is the core of the optimization problem.
+    # LsqFit minimizes the sum of squares of the returned vector.
     function residuals_function(params)
         residuals = Float64[]
-        total_weight = 0.0
 
-        # Pricing residuals
+        # Return a large value if parameters are invalid, to guide the solver
+        if !validate_discount_factors(params)
+            return fill(1e9, length(cash_flows) + 1 + (previous_params !== nothing ? length(temporal_vertices) : 0))
+        end
+
+        # Pricing residuals (weighted)
+        total_weight = 0.0
+        pricing_residuals = Float64[]
         for (market_price, cash_flow) in cash_flows
             theoretical_price = price_bond(cash_flow, ref_date, params)
             duration = calculate_duration(cash_flow, ref_date, params)
@@ -413,14 +357,12 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params;
             total_weight += weight
             
             weighted_residual = sqrt(weight) * (theoretical_price - market_price)
-            push!(residuals, weighted_residual)
+            push!(pricing_residuals, weighted_residual)
         end
         
         # Normalize bond residuals
         if total_weight > 0
-            for i in 1:length(cash_flows)
-                residuals[i] /= sqrt(total_weight)
-            end
+            append!(residuals, pricing_residuals / sqrt(total_weight))
         end
 
         # SELIC penalty residual
@@ -443,114 +385,36 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params;
     end
 
     try
-        # IMPLEMENTAÇÃO MANUAL DO LEVENBERG-MARQUARDT (igual ao código legado)
-        params_lm = copy(pso_params)
-        λ = 0.001  # Parâmetro de regularização inicial
-        converged = false
-        iterations = 0
+        # Use LsqFit.jl for a robust, standard Levenberg-Marquardt implementation
+        fit_result = LsqFit.lmfit(residuals_function, pso_params, maxIter=max_iterations, show_trace=show_trace)
         
-        current_residuals = residuals_function(params_lm)
-        current_cost = 0.5 * sum(current_residuals.^2)
+        params_lm = fit_result.param
+        converged = LsqFit.converged(fit_result)
         
-        for iter in 1:max_iterations
-            iterations = iter
-            
-            # Calcula Jacobiano numericamente
-            n_params = length(params_lm)
-            n_residuals = length(current_residuals)
-            J = zeros(n_residuals, n_params)
-            
-            h = 1e-7  # Step size para diferenças finitas
-            for j in 1:n_params
-                params_plus = copy(params_lm)
-                params_plus[j] += h
-                
-                # Aplica bounds manualmente
-                params_plus[j] = max(min(params_plus[j], [0.25, 0.15, 0.30, 0.50, 5.0, 1.0][j]), [0.05, -0.15, -0.15, -0.15, 0.5, 0.05][j])
-                
-                residuals_plus = residuals_function(params_plus)
-                J[:, j] = (residuals_plus - current_residuals) / h
-            end
-            
-            # Algoritmo de Levenberg-Marquardt
-            JtJ = J' * J
-            JtR = J' * current_residuals
-            
-            # Adiciona regularização de Levenberg-Marquardt
-            identity_matrix = Matrix{Float64}(LinearAlgebra.I, n_params, n_params)
-            A = JtJ + λ * identity_matrix
-            
-            # Resolve sistema linear: A * δ = -JtR
-            try
-                δ = -A \ JtR
-                
-                # Nova tentativa de parâmetros
-                params_new = params_lm + δ
-                
-                # Aplica bounds
-                for i in 1:length(params_new)
-                    lower = [-1.0, -2.5, -3.0, -5.0, 0.005, 0.005][i]
-                    upper = [3.0, 2.5, 3.0, 4.0, 75.0, 60.0][i]
-                    params_new[i] = max(min(params_new[i], upper), lower)
-                end
-                
-                # Avalia novo custo
-                new_residuals = residuals_function(params_new)
-                new_cost = 0.5 * sum(new_residuals.^2)
-                
-                # Critério de aceitação
-                if new_cost < current_cost
-                    # Aceita passo
-                    params_lm = params_new
-                    current_residuals = new_residuals
-                    current_cost = new_cost
-                    λ = λ / 10  # Reduz regularização
-                    
-                    # Critério de convergência mais realista para dados financeiros
-                    if norm(δ) < 1e-6 || abs(new_cost - current_cost) / max(current_cost, 1e-6) < 1e-8
-                        converged = true
-                        break
-                    end
-                else
-                    # Rejeita passo
-                    λ = λ * 10  # Aumenta regularização
-                end
-                
-            catch e
-                # Se sistema é singular, aumenta regularização
-                λ = λ * 10
-            end
-            
-            # Evita λ muito grande
-            if λ > 1e10
-                break
-            end
-        end
+        # --- Cost Calculation ---
+        # Recalculate the final cost using the same methodology as the PSO
+        # to ensure perfect comparability.
         
-        # Calcula custo final usando EXATAMENTE a mesma metodologia do PSO
+        # 1. Bond pricing cost
         total_cost = 0.0
         total_weight = 0.0
-        
-        # Custo dos títulos (metodologia ANBIMA)
         for (market_price, cash_flow) in cash_flows
             theoretical_price = price_bond(cash_flow, ref_date, params_lm)
-            
-            # Peso ANBIMA: w_i = 1/√Duration_i (versão suave)
             duration = calculate_duration(cash_flow, ref_date, params_lm)
             weight = 1.0 / sqrt(max(duration, 0.1))
             
-            # Erro absoluto em preço quadrático ponderado
-            error_abs = theoretical_price - market_price  
-            total_cost += weight * error_abs^2
+            error_sq = (theoretical_price - market_price)^2
+            total_cost += weight * error_sq
             total_weight += weight
         end
-        
-        # Penalidade SELIC (igual ao PSO)
+        cost_bonds = total_weight > 0 ? total_cost / total_weight : 0.0
+
+        # 2. SELIC penalty
         t_1day = 1/252
         r_1day_model = nss_rate(t_1day, params_lm)
         selic_penalty = 1000000.0 * (r_1day_model - selic_rate)^2
         
-        # Penalização temporal (igual ao PSO)  
+        # 3. Temporal penalty
         temporal_penalty = 0.0
         if previous_params !== nothing
             for t in temporal_vertices
@@ -561,19 +425,17 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params;
             temporal_penalty *= temporal_penalty_weight
         end
         
-        # Combina TODOS os componentes (igual ao PSO)
-        cost_bonds = total_cost / total_weight
         cost_lm = cost_bonds + selic_penalty + temporal_penalty
 
         if verbose
-            println("   Convergiu: $(converged ? "✅" : "❌") em $iterations iterações")
+            println("   Convergiu com LsqFit.jl: $(converged ? "✅" : "❌")")
             println("   Custo LM (unificado): $(round(cost_lm, digits=6))")
         end
         
         return params_lm, cost_lm, converged
         
     catch e
-        @warn "LM optimization failed: $e. Retornando parâmetros PSO."
+        @warn "LsqFit.jl LM optimization failed: $e. Retornando parâmetros PSO."
         
         # Fallback to calculate PSO cost for comparison
         pso_residuals = residuals_function(pso_params)
@@ -629,62 +491,45 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
         return zeros(6), Inf, [], 0, 0
     end
     
-    # Initialize quantities if not provided
     if bond_quantities === nothing
         bond_quantities = ones(length(cash_flows))
     end
+
+    # --- Stage 1: Liquidity Pre-filtering ---
+    total_quantity = sum(bond_quantities)
+    liquidity_threshold = fator_liq * total_quantity
+
+    liquid_mask = [q >= liquidity_threshold for q in bond_quantities]
+
+    initial_cash_flows = [cf for (cf, is_liquid) in zip(cash_flows, liquid_mask) if is_liquid]
+    initial_quantities = [q for (q, is_liquid) in zip(bond_quantities, liquid_mask) if is_liquid]
+
+    illiquid_removed_count = length(cash_flows) - length(initial_cash_flows)
     
     if verbose
-        println("🎯 Iniciando otimização NSS com remoção iterativa de outliers (MAD + Liquidez)")
-        println("   Critério duplo: Erro > $(fator_erro) × MAD E Quantidade < $(fator_liq*100)% do total")
-        println("   Títulos iniciais: $(length(cash_flows))")
+        println("🎯 Iniciando otimização NSS com remoção de outliers em duas fases")
+        println("   Fase 1: Filtro de liquidez (remove títulos com < $(round(liquidity_threshold, digits=1)) de volume)")
+        println("   Removidos por iliquidez: $illiquid_removed_count")
+        println("   Títulos restantes para otimização: $(length(initial_cash_flows))")
+        println("   Fase 2: Remoção iterativa por erro de preço (MAD > $(fator_erro)σ)")
     end
     
-    current_cash_flows = copy(cash_flows)
-    current_quantities = copy(bond_quantities)
-    total_outliers_removed = 0
+    current_cash_flows = copy(initial_cash_flows)
+    current_quantities = copy(initial_quantities)
+    total_outliers_removed = illiquid_removed_count
     
+    # --- Stage 2: Iterative Error-based Outlier Removal ---
     for iteration in 1:max_iterations
-        if verbose
-            println()
-            println("--- ITERAÇÃO $iteration ---")
-        end
+        if verbose; println("\n--- ITERAÇÃO $iteration ---"); end
         
-        # Check minimum bonds
         if length(current_cash_flows) < min_bonds
-            if verbose
-                println("⚠️  Menos de $min_bonds títulos restantes. Parando.")
-            end
+            if verbose; println("⚠️  Menos de $min_bonds títulos restantes. Parando."); end
             break
         end
         
-        # Preliminary PSO fit
-        pso_calls = min(pso_f_calls_limit ÷ 2, 1000)  # Use fewer calls for preliminary fit
+        pso_calls = min(pso_f_calls_limit ÷ 2, 1000)
         pso_particles = max(pso_N ÷ 2, 20)
-        
-        if verbose
-            println("🔄 Fit preliminar: N=$pso_particles, calls=$pso_calls")
-        end
-        
-        if previous_params !== nothing
-            if verbose
-                selic_rate_pct = round(get_selic_rate(ref_date; verbose=verbose)*100, digits=2)
-                println("Implementando penalidade para forçar r(1 dia) = $(selic_rate_pct)% (SELIC oficial)")
-                println("Usando parâmetros do dia anterior como ponto inicial")
-                println("Penalização temporal: peso = $temporal_penalty_weight")
-            end
-        else
-            if verbose
-                selic_rate_pct = round(get_selic_rate(ref_date; verbose=verbose)*100, digits=2)
-                println("Implementando penalidade para forçar r(1 dia) = $(selic_rate_pct)% (SELIC oficial)")
-            end
-        end
-        
-        if verbose
-            println("Hiperparâmetros PSO: N=$pso_particles, C1=$pso_C1, C2=$pso_C2, ω=$pso_omega, calls=$pso_calls")
-            println("🚀 Usando tempos pré-calculados para otimização de desempenho")
-            println("Executando otimização...")
-        end
+        if verbose; println("🔄 Fit preliminar: N=$pso_particles, calls=$pso_calls"); end
         
         params, cost = optimize_pso_nss(current_cash_flows, ref_date;
                                        previous_params=previous_params,
@@ -693,104 +538,38 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
                                        pso_omega=pso_omega, pso_f_calls_limit=pso_calls,
                                        verbose=verbose)
         
-        if verbose
-            println("Custo final: $(round(cost, digits=6))")
-            println("Custo iteração $iteration: $(round(cost, digits=6))")
-        end
+        if verbose; println("Custo iteração $iteration: $(round(cost, digits=6))"); end
         
-        # Detect outliers
-        outlier_indices, errors, mad_value = detect_outliers_mad_and_liquidity(
-            current_cash_flows, current_quantities, ref_date, params;
-            fator_erro=fator_erro, fator_liq=fator_liq)
+        outlier_indices, errors, mad_value = detect_outliers_mad(
+            current_cash_flows, ref_date, params;
+            fator_erro=fator_erro)
         
-        # Print outlier summary
         error_threshold = fator_erro * mad_value
-        liquidity_threshold = fator_liq * sum(current_quantities)
-        if verbose
-            println("MAD = $(round(mad_value, digits=3)), Erro threshold = $(round(error_threshold, digits=2)), Liquidez threshold = $(round(liquidity_threshold, digits=1))")
-        end
+        if verbose; println("MAD = $(round(mad_value, digits=3)), Erro threshold = $(round(error_threshold, digits=2))"); end
         
         if isempty(outlier_indices)
-            if verbose
-                println("✅ Nenhum outlier detectado. Processo concluído.")
-            end
-            
-            # Final intensive fit
-            if verbose
-                println()
-                println("🚀 FIT FINAL INTENSIVO com $(length(current_cash_flows)) títulos limpos")
-            end
-            if previous_params !== nothing
-                if verbose
-                    selic_rate_pct = round(get_selic_rate(ref_date; verbose=verbose)*100, digits=2)
-                    println("Implementando penalidade para forçar r(1 dia) = $(selic_rate_pct)% (SELIC oficial)")
-                    println("Usando parâmetros do dia anterior como ponto inicial")
-                    println("Penalização temporal: peso = $temporal_penalty_weight")
-                end
-            else
-                if verbose
-                    selic_rate_pct = round(get_selic_rate(ref_date; verbose=verbose)*100, digits=2)
-                    println("Implementando penalidade para forçar r(1 dia) = $(selic_rate_pct)% (SELIC oficial)")
-                end
-            end
-            if verbose
-                println("Hiperparâmetros PSO: N=$pso_N, C1=$pso_C1, C2=$pso_C2, ω=$pso_omega, calls=$pso_f_calls_limit")
-                println("🚀 Usando tempos pré-calculados para otimização de desempenho")
-                println("Executando otimização...")
-            end
-            
-            final_params, final_cost = optimize_pso_nss(current_cash_flows, ref_date;
-                                                       previous_params=previous_params,
-                                                       temporal_penalty_weight=temporal_penalty_weight,
-                                                       pso_N=pso_N, pso_C1=pso_C1, pso_C2=pso_C2,
-                                                       pso_omega=pso_omega, pso_f_calls_limit=pso_f_calls_limit,
-                                                       verbose=verbose)
-            
-            if verbose
-                println("Custo final: $(round(final_cost, digits=6))")
-                println("Custo final: $(round(final_cost, digits=6))")
-                println()
-                println("📊 RESUMO FINAL:")
-                println("   Total de outliers removidos: $total_outliers_removed")
-                println("   Títulos no fit final: $(length(current_cash_flows))")
-                println("   Iterações usadas: $iteration")
-            end
-            
-            return final_params, final_cost, current_cash_flows, total_outliers_removed, iteration
+            if verbose; println("✅ Nenhum outlier de preço detectado. Processo concluído."); end
+            # No outliers found, break loop and proceed to final fit
+            break
         end
         
-        # Print outlier details
-        if !isempty(outlier_indices)
-            if verbose
-                println("⚠️  Outliers detectados: $(length(outlier_indices)) títulos")
-            end
+        if verbose
+            println("⚠️  Outliers de preço detectados: $(length(outlier_indices)) títulos")
             for i in outlier_indices
-                if i <= length(current_cash_flows) && i <= length(current_quantities)
-                    market_price = current_cash_flows[i][1]
-                    quantity = current_quantities[i]
-                    error = errors[i]
-                    if verbose
-                        println("    💥 Erro=R\$$(round(error, digits=2)) | Qtde=$(round(quantity, digits=0)) | Preço=R\$$(round(market_price, digits=2))")
-                    end
-                end
+                market_price = current_cash_flows[i][1]
+                quantity = current_quantities[i]
+                error_val = errors[i]
+                println("    💥 Erro=R\$$(round(error_val, digits=2)) | Qtde=$(round(quantity, digits=0)) | Preço=R\$$(round(market_price, digits=2))")
             end
-            if verbose
-                println("🗑️  Removidos $(length(outlier_indices)) outliers. Títulos restantes: $(length(current_cash_flows) - length(outlier_indices))")
-            end
+            println("🗑️  Removidos $(length(outlier_indices)) outliers. Títulos restantes: $(length(current_cash_flows) - length(outlier_indices))")
         end
         
-        # Remove outliers
         current_cash_flows, current_quantities = remove_outliers(current_cash_flows, current_quantities, outlier_indices)
         total_outliers_removed += length(outlier_indices)
     end
     
-    # If we reach here, we've used all iterations
-    if verbose
-        println()
-        println("⚠️  Máximo de iterações ($max_iterations) atingido")
-    end
+    if verbose; println("\n🚀 FIT FINAL INTENSIVO com $(length(current_cash_flows)) títulos limpos"); end
     
-    # Final fit with remaining bonds
     final_params, final_cost = optimize_pso_nss(current_cash_flows, ref_date;
                                                previous_params=previous_params,
                                                temporal_penalty_weight=temporal_penalty_weight,
@@ -799,10 +578,9 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
                                                verbose=verbose)
     
     if verbose
-        println("📊 RESUMO FINAL:")
-        println("   Total de outliers removidos: $total_outliers_removed")
+        println("\n📊 RESUMO FINAL:")
+        println("   Total de outliers removidos: $total_outliers_removed ($illiquid_removed_count por liquidez)")
         println("   Títulos no fit final: $(length(current_cash_flows))")
-        println("   Iterações usadas: $max_iterations")
     end
     
     return final_params, final_cost, current_cash_flows, total_outliers_removed, max_iterations
@@ -811,45 +589,40 @@ end
 """
     calculate_out_of_sample_cost_reais(cash_flows, bond_quantities, ref_date, params; use_precalc=true)
 
-Calcula custo out-of-sample como somatório de (liquidez × erro) em reais
-- Erro SEM módulo: preço_teórico - preço_mercado
-- Liquidez: quantidade negociada do título
-- Resultado em REAIS de erro de precificação do dia
+Calculates the liquidity-weighted absolute pricing error for a set of bonds.
+This serves as a meaningful out-of-sample cost metric in currency units.
+
+- Error metric: `sum(liquidity_i * |theoretical_price_i - market_price_i|)`
+- This prevents positive and negative errors from canceling each other out.
 
 # Args
-- cash_flows: fluxos dos títulos (market_price, cash_flow)
-- bond_quantities: vetor com quantidades negociadas
-- ref_date: data de referência
-- params: parâmetros NSS [β0, β1, β2, β3, τ1, τ2]
-- use_precalc: usar tempos pré-calculados para performance
+- cash_flows: A vector of (market_price, cash_flow) tuples.
+- bond_quantities: A vector of corresponding trading quantities (liquidity).
+- ref_date: The reference date for pricing.
+- params: The NSS parameters [β0, β1, β2, β3, τ1, τ2].
+- use_precalc: Whether to use pre-calculated time fractions for performance.
 
 # Returns
-- cost_reais: custo total em reais para o dia
+- total_abs_error_reais: The total liquidity-weighted absolute error in currency units.
 """
 function calculate_out_of_sample_cost_reais(cash_flows, bond_quantities, ref_date, params; use_precalc=true)
-    # Pre-calcula tempos se solicitado
     optimized_cash_flows = use_precalc ? precompute_cash_flow_times(cash_flows, ref_date) : cash_flows
     
-    total_cost_reais = 0.0
+    total_abs_error_reais = 0.0
     
     for (i, (market_price, cash_flow)) in enumerate(optimized_cash_flows)
-        if use_precalc
-            theoretical_price = price_bond_precalc(cash_flow, params)
-        else
-            theoretical_price = price_bond(cash_flow, ref_date, params)
-        end
+        theoretical_price = use_precalc ? price_bond_precalc(cash_flow, params) : price_bond(cash_flow, ref_date, params)
         
-        # Erro SEM módulo (pode ser positivo ou negativo)
-        error = theoretical_price - market_price
+        # Use absolute error to prevent positive and negative errors from canceling out
+        error_abs = abs(theoretical_price - market_price)
         
-        # Liquidez do título
         liquidity = bond_quantities[i]
         
-        # Contribuição em reais: liquidez × erro
-        total_cost_reais += liquidity * error
+        # Contribution in currency units: liquidity * absolute_error
+        total_abs_error_reais += liquidity * error_abs
     end
     
-    return total_cost_reais
+    return total_abs_error_reais
 end
 
 """
