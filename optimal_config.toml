@@ -1,33 +1,33 @@
 [performance_metrics]
-hybrid_score_normalized = 0.5161
-overfitting_ratio = 0.895
-vertex_stability_bp_per_day = 28.49
-methodology = "PSO_plus_LM_final_comparison_winner"
-avg_train_cost_normalized = 1.83208204
+hybrid_score_normalized = 0.5081
+overfitting_ratio = 0.927
+vertex_stability_bp_per_day = 32.2
+methodology = "PSO_only_final_comparison_winner"
+avg_train_cost_normalized = 2.97203687
 regimes_tested = 6
 cv_method = "cross_regime_walk_forward_30days_with_final_pso_vs_lm_comparison"
 blocks_completed = 6
 period = "2014-2024_all_regimes"
 selection_method = "bayesian_optimization_plus_final_head_to_head_comparison"
-execution_time_minutes = 20.3
-avg_test_cost_normalized = 1.63980953
+execution_time_minutes = 31.1
+avg_test_cost_normalized = 2.75630185
 
 [optimal_config.pso]
-C1 = 1.0039761352765422
-C2 = 1.1007215347970765
-omega = 0.38187167447505854
-N = 41
-f_calls_limit = 2173
+C1 = 1.8204961838008238
+C2 = 2.4553487911006404
+omega = 0.2866527715503329
+N = 31
+f_calls_limit = 2456
 
 [optimal_config.optimization]
-temporal_penalty_weight = 0.082809504271654
-use_lm = true
+temporal_penalty_weight = 0.168047804642099
+use_lm = false
 
 [optimal_config.outlier_detection]
-mad_threshold = 9.190169640809092
-fator_liq = 0.014753186088987378
+mad_threshold = 8.172370227020444
+fator_liq = 0.007001959705756716
 
 [metadata]
 cv_method = "cross_regime_walk_forward_30days"
-generated_at = "2025-08-06T20:09:53.034"
+generated_at = "2025-08-10T18:40:25.491"
 methodology = "PSO_plus_LM_hybrid_bayesian_optimization"

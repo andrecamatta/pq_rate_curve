@@ -81,6 +81,69 @@ function detect_outliers_mad(cash_flows, ref_date, params; fator_erro=3.0)
 end
 
 """
+    detect_outliers_mad_and_liquidity(cash_flows, bond_quantities, ref_date, params; 
+                                     fator_erro=3.0, fator_liq=0.1) -> (Vector{Int}, Vector{Float64}, Float64)
+
+Detect outliers based on TWO simultaneous conditions:
+1. Error > fator_erro × MAD  
+2. Trading quantity < fator_liq % of total
+
+Parameters:
+- cash_flows: List of (market_price, cash_flow) tuples
+- bond_quantities: Vector with corresponding trading quantities
+- ref_date: Reference date
+- params: Current NSS parameters
+- fator_erro: MAD multiplier for outlier classification (default: 3.0)
+- fator_liq: Percentage of total quantity (default: 0.1 = 10%)
+
+Returns:
+- outlier_indices: Indices of bonds classified as outliers
+- errors: Vector with pricing errors for all bonds
+- mad_value: Calculated MAD value
+"""
+function detect_outliers_mad_and_liquidity(cash_flows, bond_quantities, ref_date, params; 
+                                          fator_erro=3.0, fator_liq=0.1)
+    if isempty(cash_flows)
+        return Int[], Float64[], 0.0
+    end
+    
+    # Calculate pricing errors for all bonds
+    errors = Float64[]
+    for (market_price, cash_flow) in cash_flows
+        theoretical_price = price_bond(cash_flow, ref_date, params)
+        error_abs = abs(theoretical_price - market_price)
+        push!(errors, error_abs)
+    end
+    
+    # Calculate MAD of errors
+    mad_value = calculate_mad(errors)
+    error_threshold = fator_erro * mad_value
+    
+    # Calculate liquidity threshold
+    total_quantity = sum(bond_quantities)
+    liquidity_threshold = fator_liq * total_quantity
+    
+    # Identify outliers that satisfy BOTH conditions
+    outlier_indices = Int[]
+    for (i, error) in enumerate(errors)
+        quantity = bond_quantities[i]
+        
+        # Condition 1: High error
+        high_error = error > error_threshold
+        
+        # Condition 2: Low liquidity
+        low_liquidity = quantity < liquidity_threshold
+        
+        # Outlier only if BOTH conditions are true
+        if high_error && low_liquidity
+            push!(outlier_indices, i)
+        end
+    end
+    
+    return outlier_indices, errors, mad_value
+end
+
+"""
     remove_outliers(cash_flows, bond_quantities, outlier_indices) -> (Vector, Vector)
 
 Remove outliers from cash flows and bond quantities arrays.

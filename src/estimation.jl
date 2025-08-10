@@ -386,10 +386,25 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params;
 
     try
         # Use LsqFit.jl for a robust, standard Levenberg-Marquardt implementation
-        fit_result = LsqFit.lmfit(residuals_function, pso_params, maxIter=max_iterations, show_trace=show_trace)
+        # Create dummy x data since LsqFit expects model(x, params) format
+        n_residuals = length(residuals_function(pso_params))
+        dummy_x = collect(1:n_residuals)  # dummy x data
+        
+        # Wrapper function to convert residuals to model format
+        function model_wrapper(x, params)
+            residuals = residuals_function(params)
+            return residuals  # LsqFit expects model output, not residuals
+        end
+        
+        # Target is zero residuals
+        target_y = zeros(n_residuals)
+        
+        # Use curve_fit which implements Levenberg-Marquardt internally
+        fit_result = LsqFit.curve_fit(model_wrapper, dummy_x, target_y, pso_params; 
+                                     maxIter=max_iterations, show_trace=show_trace)
         
         params_lm = fit_result.param
-        converged = LsqFit.converged(fit_result)
+        converged = fit_result.converged
         
         # --- Cost Calculation ---
         # Recalculate the final cost using the same methodology as the PSO
@@ -494,31 +509,18 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
     if bond_quantities === nothing
         bond_quantities = ones(length(cash_flows))
     end
-
-    # --- Stage 1: Liquidity Pre-filtering ---
-    total_quantity = sum(bond_quantities)
-    liquidity_threshold = fator_liq * total_quantity
-
-    liquid_mask = [q >= liquidity_threshold for q in bond_quantities]
-
-    initial_cash_flows = [cf for (cf, is_liquid) in zip(cash_flows, liquid_mask) if is_liquid]
-    initial_quantities = [q for (q, is_liquid) in zip(bond_quantities, liquid_mask) if is_liquid]
-
-    illiquid_removed_count = length(cash_flows) - length(initial_cash_flows)
     
     if verbose
-        println("🎯 Iniciando otimização NSS com remoção de outliers em duas fases")
-        println("   Fase 1: Filtro de liquidez (remove títulos com < $(round(liquidity_threshold, digits=1)) de volume)")
-        println("   Removidos por iliquidez: $illiquid_removed_count")
-        println("   Títulos restantes para otimização: $(length(initial_cash_flows))")
-        println("   Fase 2: Remoção iterativa por erro de preço (MAD > $(fator_erro)σ)")
+        println("🎯 Iniciando otimização NSS com remoção iterativa de outliers (MAD + Liquidez)")
+        println("   Critério duplo: Erro > $(fator_erro) × MAD E Quantidade < $(fator_liq*100)% do total")
+        println("   Títulos iniciais: $(length(cash_flows))")
     end
     
-    current_cash_flows = copy(initial_cash_flows)
-    current_quantities = copy(initial_quantities)
-    total_outliers_removed = illiquid_removed_count
+    current_cash_flows = copy(cash_flows)
+    current_quantities = copy(bond_quantities)
+    total_outliers_removed = 0
     
-    # --- Stage 2: Iterative Error-based Outlier Removal ---
+    # --- Iterative Outlier Removal with Dual Criteria ---
     for iteration in 1:max_iterations
         if verbose; println("\n--- ITERAÇÃO $iteration ---"); end
         
@@ -527,6 +529,7 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
             break
         end
         
+        # Preliminary PSO fit
         pso_calls = min(pso_f_calls_limit ÷ 2, 1000)
         pso_particles = max(pso_N ÷ 2, 20)
         if verbose; println("🔄 Fit preliminar: N=$pso_particles, calls=$pso_calls"); end
@@ -540,28 +543,36 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
         
         if verbose; println("Custo iteração $iteration: $(round(cost, digits=6))"); end
         
-        outlier_indices, errors, mad_value = detect_outliers_mad(
-            current_cash_flows, ref_date, params;
-            fator_erro=fator_erro)
+        # Detect outliers using BOTH criteria simultaneously
+        outlier_indices, errors, mad_value = detect_outliers_mad_and_liquidity(
+            current_cash_flows, current_quantities, ref_date, params;
+            fator_erro=fator_erro, fator_liq=fator_liq)
         
+        # Print outlier summary
         error_threshold = fator_erro * mad_value
-        if verbose; println("MAD = $(round(mad_value, digits=3)), Erro threshold = $(round(error_threshold, digits=2))"); end
+        total_quantity = sum(current_quantities)
+        liquidity_threshold = fator_liq * total_quantity
+        if verbose
+            println("MAD = $(round(mad_value, digits=3)), Erro threshold = $(round(error_threshold, digits=2)), Liquidez threshold = $(round(liquidity_threshold, digits=1))")
+        end
         
         if isempty(outlier_indices)
-            if verbose; println("✅ Nenhum outlier de preço detectado. Processo concluído."); end
-            # No outliers found, break loop and proceed to final fit
+            if verbose; println("✅ Nenhum outlier detectado. Processo concluído."); end
             break
         end
         
-        if verbose
-            println("⚠️  Outliers de preço detectados: $(length(outlier_indices)) títulos")
-            for i in outlier_indices
-                market_price = current_cash_flows[i][1]
-                quantity = current_quantities[i]
-                error_val = errors[i]
-                println("    💥 Erro=R\$$(round(error_val, digits=2)) | Qtde=$(round(quantity, digits=0)) | Preço=R\$$(round(market_price, digits=2))")
+        # Print outlier details
+        if !isempty(outlier_indices)
+            if verbose
+                println("⚠️  Outliers detectados: $(length(outlier_indices)) títulos")
+                for i in outlier_indices
+                    market_price = current_cash_flows[i][1]
+                    quantity = current_quantities[i]
+                    error_val = errors[i]
+                    println("    💥 Erro=R\$$(round(error_val, digits=2)) | Qtde=$(round(quantity, digits=0)) | Preço=R\$$(round(market_price, digits=2))")
+                end
+                println("🗑️  Removidos $(length(outlier_indices)) outliers. Títulos restantes: $(length(current_cash_flows) - length(outlier_indices))")
             end
-            println("🗑️  Removidos $(length(outlier_indices)) outliers. Títulos restantes: $(length(current_cash_flows) - length(outlier_indices))")
         end
         
         current_cash_flows, current_quantities = remove_outliers(current_cash_flows, current_quantities, outlier_indices)
@@ -579,8 +590,9 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
     
     if verbose
         println("\n📊 RESUMO FINAL:")
-        println("   Total de outliers removidos: $total_outliers_removed ($illiquid_removed_count por liquidez)")
+        println("   Total de outliers removidos: $total_outliers_removed")
         println("   Títulos no fit final: $(length(current_cash_flows))")
+        println("   Iterações usadas: $max_iterations")
     end
     
     return final_params, final_cost, current_cash_flows, total_outliers_removed, max_iterations

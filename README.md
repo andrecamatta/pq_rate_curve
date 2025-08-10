@@ -157,7 +157,7 @@ r(τ) = β₀ + β₁[(1-e^(-τ/τ₁))/(τ/τ₁)] + β₂[((1-e^(-τ/τ₁))/(
 
 - **MAD (Median Absolute Deviation)**: Remove títulos com preços anômalos
 - **Critério de liquidez**: Remove títulos com baixo volume negociado
-- **Threshold adaptativo**: Baseado no volume total do dia
+- **Critérios simultâneos**: Outlier apenas se AMBAS condições são verdadeiras
 
 ### Validação Cruzada
 
