@@ -43,11 +43,8 @@ function read_optimal_config()
     elseif isfile("config.toml")
         config = TOML.parsefile("config.toml")
         return normalize_config_format(config)
-    # Fallback para o formato antigo
-    elseif isfile("optimal_pso_lm_continuous.txt")
-        return read_legacy_config()
     else
-        error("Nenhum arquivo de configuração encontrado! (optimal_config.toml, config.toml ou optimal_pso_lm_continuous.txt)")
+        error("Nenhum arquivo de configuração encontrado! (optimal_config.toml ou config.toml)")
     end
 end
 
@@ -66,6 +63,9 @@ function normalize_config_format(config)
         normalized["C2"] = pso["C2"]
         normalized["omega"] = pso["omega"]
         normalized["f_calls_limit"] = pso["f_calls_limit"]
+        # Add bounds with defaults for backward compatibility
+        normalized["lower_bounds"] = get(pso, "lower_bounds", [0.01, -0.25, -0.30, -0.20, 0.5, 2.0])
+        normalized["upper_bounds"] = get(pso, "upper_bounds", [0.30, 0.25, 0.30, 0.20, 20.0, 50.0])
     else
         error("Missing required configuration section: pso")
     end
@@ -87,46 +87,21 @@ function normalize_config_format(config)
     else
         error("Missing required configuration section: outlier_detection")
     end
+
+    # Extrai parâmetros de fit_curves (com defaults para retrocompatibilidade)
+    fit_curves_config = get(actual_config, "fit_curves", Dict())
+    normalized["continuity_search_days"] = get(fit_curves_config, "continuity_search_days", 30)
+    normalized["min_bonds_for_fit"] = get(fit_curves_config, "min_bonds_for_fit", 3)
+    normalized["lm_max_iterations"] = get(fit_curves_config, "lm_max_iterations", 50)
+    normalized["reoptimization_cost_multiplier"] = get(fit_curves_config, "reoptimization_cost_multiplier", 10.0)
+    normalized["reoptimization_pso_multiplier"] = get(fit_curves_config, "reoptimization_pso_multiplier", 2.0)
     
     # Add validation section if missing (for compatibility)
     if !haskey(actual_config, "validation")
-        normalized["validation"] = Dict("num_hyperparameter_configs" => 5, "use_focused_search" => false)
+        normalized["validation"] = Dict("num_hyperparameter_configs" => 5)
     end
     
     return normalized
-end
-
-# Função para ler configuração no formato legado
-function read_legacy_config()
-    config = Dict{String, Any}()
-    
-    open("optimal_pso_lm_continuous.txt", "r") do file
-        for line in eachline(file)
-            line = strip(line)
-            if contains(line, " = ") && !startswith(line, "#")
-                key, value = split(line, " = ", limit=2)
-                key = strip(key)
-                value = strip(value)
-                
-                if key in ["N", "f_calls_limit"]
-                    config[key] = parse(Int, value)
-                elseif key in ["C1", "C2", "omega", "temporal_penalty_weight", "mad_threshold", "fator_liq"]
-                    config[key] = parse(Float64, value)
-                elseif key == "use_lm"
-                    config[key] = value == "true"
-                else
-                    config[key] = value
-                end
-            end
-        end
-    end
-    
-    # Compatibilidade: adiciona parâmetros padrão se não existirem
-    if !haskey(config, "fator_liq")
-        config["fator_liq"] = 0.03  # 3% padrão (mais conservador)
-    end
-    
-    return config
 end
 
 # Gera datas úteis
@@ -151,10 +126,10 @@ function find_continuity_params(start_date::Date, config::Dict{String, Any}; ver
         println("🔍 Buscando parâmetros de continuidade antes de $start_date...")
     end
     
-    # Busca até 30 dias antes da data inicial
+    # Busca até X dias antes da data inicial, conforme configuração
     search_date = start_date - Day(1)
     
-    for _ in 1:30
+    for _ in 1:config["continuity_search_days"]
         if Dates.dayofweek(search_date) in 1:5  # Dia útil
             try
                 if verbose
@@ -186,14 +161,14 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
     try
         df = load_bacen_data(date, date)
         
-        if nrow(df) < 3
-            return DayResult(date, false, nothing, nothing, 0, 0, "Dados insuficientes (<3 títulos)", false, false)
+        if nrow(df) < config["min_bonds_for_fit"]
+            return DayResult(date, false, nothing, nothing, 0, 0, "Dados insuficientes (<$(config["min_bonds_for_fit"]) títulos)", false, false)
         end
         
         cash_flows, bond_quantities, _ = generate_cash_flows_with_quantity(df, date)
         
-        if length(cash_flows) < 3
-            return DayResult(date, false, nothing, nothing, 0, 0, "Cash flows insuficientes (<3)", false, false)
+        if length(cash_flows) < config["min_bonds_for_fit"]
+            return DayResult(date, false, nothing, nothing, 0, 0, "Cash flows insuficientes (<$(config["min_bonds_for_fit"]))", false, false)
         end
         
         if verbose
@@ -202,7 +177,7 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
         
         # Otimização com remoção de outliers
         params, cost, final_cash_flows, outliers_removed, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
-            cash_flows, date;
+            cash_flows, date, config["lower_bounds"], config["upper_bounds"];
             previous_params=previous_params,
             temporal_penalty_weight=config["temporal_penalty_weight"],
             pso_N=config["N"],
@@ -219,8 +194,8 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
         if config["use_lm"]
             try
                 params_lm, cost_lm, lm_success = refine_nss_with_levenberg_marquardt(
-                    final_cash_flows, date, params;
-                    max_iterations=50, show_trace=false,
+                    final_cash_flows, date, params, config["lower_bounds"], config["upper_bounds"];
+                    max_iterations=config["lm_max_iterations"], show_trace=false,
                     previous_params=previous_params,
                     temporal_penalty_weight=config["temporal_penalty_weight"]
                 )
@@ -238,68 +213,11 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
         end
         
         used_previous = previous_params !== nothing
-        reoptimized = false
         
-        # Verifica se custo é 10x maior que o anterior - re-otimiza se necessário
-        if previous_cost !== nothing && cost > 10.0 * previous_cost
-            if verbose
-                println(" ⚠️ Custo elevado ($(round(cost, digits=4)) > 10×$(round(previous_cost, digits=4))), re-otimizando...")
-            end
-            
-            # Re-otimização com parâmetros dobrados
-            params_reopt, cost_reopt, final_cash_flows_reopt, outliers_removed_reopt, iterations_reopt = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
-                cash_flows, date;
-                previous_params=previous_params,
-                temporal_penalty_weight=config["temporal_penalty_weight"],
-                pso_N=config["N"] * 2,  # Dobra número de partículas
-                pso_C1=config["C1"],
-                pso_C2=config["C2"],
-                pso_omega=config["omega"],
-                pso_f_calls_limit=config["f_calls_limit"] * 2,  # Dobra f_calls
-                fator_erro=config["mad_threshold"],
-                fator_liq=config["fator_liq"],
-                bond_quantities=bond_quantities
-            )
-            
-            # Refinamento LM na re-otimização se configurado
-            if config["use_lm"]
-                try
-                    params_lm_reopt, cost_lm_reopt, lm_success_reopt = refine_nss_with_levenberg_marquardt(
-                        final_cash_flows_reopt, date, params_reopt;
-                        max_iterations=50, show_trace=false,
-                        previous_params=previous_params,
-                        temporal_penalty_weight=config["temporal_penalty_weight"]
-                    )
-                    
-                    if lm_success_reopt && cost_lm_reopt < cost_reopt
-                        params_reopt = params_lm_reopt
-                        cost_reopt = cost_lm_reopt
-                        if verbose
-                            print(" + LM-reopt")
-                        end
-                    end
-                catch
-                    # Mantém PSO re-otimizado se LM falhar
-                end
-            end
-            
-            # Aceita re-otimização se melhorou o custo
-            if cost_reopt < cost
-                params = params_reopt
-                cost = cost_reopt
-                final_cash_flows = final_cash_flows_reopt
-                outliers_removed = outliers_removed_reopt
-                reoptimized = true
-                
-                if verbose
-                    println(" 🚀 Re-otimização melhorou: $(round(cost, digits=4))")
-                end
-            else
-                if verbose
-                    println(" 😞 Re-otimização não melhorou: $(round(cost_reopt, digits=4)) >= $(round(cost, digits=4))")
-                end
-            end
-        end
+        # Tenta re-otimizar se o custo for muito alto em comparação com o dia anterior
+        params, cost, final_cash_flows, outliers_removed, reoptimized = _reoptimize_if_needed(
+            cost, previous_cost, config, cash_flows, date, params, final_cash_flows, outliers_removed, bond_quantities, previous_params, verbose
+        )
         
         if verbose
             outlier_info = outliers_removed > 0 ? " (-$outliers_removed outliers)" : ""
@@ -317,6 +235,61 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
         return DayResult(date, false, nothing, nothing, 0, 0, error_msg, false, false)
     end
 end
+
+function _reoptimize_if_needed(cost, previous_cost, config, cash_flows, date, params, final_cash_flows, outliers_removed, bond_quantities, previous_params, verbose)
+    reoptimized = false
+    reopt_multiplier = config["reoptimization_cost_multiplier"]
+
+    if previous_cost === nothing || cost <= reopt_multiplier * previous_cost
+        return params, cost, final_cash_flows, outliers_removed, reoptimized
+    end
+
+    if verbose
+        println(" ⚠️ Custo elevado ($(round(cost, digits=4)) > $(reopt_multiplier)×$(round(previous_cost, digits=4))), re-otimizando...")
+    end
+
+    pso_multiplier = config["reoptimization_pso_multiplier"]
+    params_reopt, cost_reopt, final_cash_flows_reopt, outliers_removed_reopt, _ = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+        cash_flows, date, config["lower_bounds"], config["upper_bounds"];
+        previous_params=previous_params,
+        temporal_penalty_weight=config["temporal_penalty_weight"],
+        pso_N=round(Int, config["N"] * pso_multiplier),
+        pso_C1=config["C1"],
+        pso_C2=config["C2"],
+        pso_omega=config["omega"],
+        pso_f_calls_limit=round(Int, config["f_calls_limit"] * pso_multiplier),
+        fator_erro=config["mad_threshold"],
+        fator_liq=config["fator_liq"],
+        bond_quantities=bond_quantities
+    )
+
+    if config["use_lm"]
+        try
+            params_lm_reopt, cost_lm_reopt, lm_success_reopt = refine_nss_with_levenberg_marquardt(
+                final_cash_flows_reopt, date, params_reopt, config["lower_bounds"], config["upper_bounds"];
+                max_iterations=config["lm_max_iterations"], show_trace=false,
+                previous_params=previous_params,
+                temporal_penalty_weight=config["temporal_penalty_weight"]
+            )
+            if lm_success_reopt && cost_lm_reopt < cost_reopt
+                params_reopt = params_lm_reopt
+                cost_reopt = cost_lm_reopt
+                if verbose; print(" + LM-reopt"); end
+            end
+        catch
+            # Mantém PSO re-otimizado se LM falhar
+        end
+    end
+
+    if cost_reopt < cost
+        if verbose; println(" 🚀 Re-otimização melhorou: $(round(cost_reopt, digits=4))"); end
+        return params_reopt, cost_reopt, final_cash_flows_reopt, outliers_removed_reopt, true
+    else
+        if verbose; println(" 😞 Re-otimização não melhorou: $(round(cost_reopt, digits=4)) >= $(round(cost, digits=4))"); end
+        return params, cost, final_cash_flows, outliers_removed, false
+    end
+end
+
 
 # Fit sequencial principal
 function fit_curves_sequential(start_date::Date, end_date::Date; 

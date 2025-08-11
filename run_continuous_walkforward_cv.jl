@@ -2,12 +2,20 @@
 
 using Distributed
 
-# Configuração automática de workers para processamento paralelo
-if nworkers() == 1
-    n_cores = min(Sys.CPU_THREADS, 8)
-    println("🚀 Adicionando $n_cores workers para processamento paralelo...")
-    addprocs(n_cores)
+# Configuração de workers para processamento paralelo a partir do config.toml
+function setup_workers()
+    config = TOML.parsefile("config.toml")
+    cv_config = get(config, "cross_validation", Dict())
+    max_cores = get(cv_config, "max_cores", Sys.CPU_THREADS)
+
+    if nworkers() == 1
+        n_cores = min(Sys.CPU_THREADS, max_cores)
+        println("🚀 Adicionando $n_cores workers para processamento paralelo...")
+        addprocs(n_cores)
+    end
 end
+
+setup_workers()
 
 # 1. Carrega o módulo no processo principal
 include(joinpath(@__DIR__, "src/PQRateCurve.jl"))
@@ -65,44 +73,39 @@ global BAYESIAN_START_TIME = 0.0
 
 
 
-# Blocos contínuos de 30 dias: Treino → Teste, cobrindo diferentes regimes
-function get_continuous_blocks()
-    blocks = [
-        # Crise Política/Econômica - Março 2015 (Início do impeachment)
-        (train_start=Date(2015,2,1), train_end=Date(2015,2,28), 
-         test_start=Date(2015,3,1), test_end=Date(2015,3,31)),
-        
-        # Recessão Severa - Agosto 2016 (Pico da recessão)
-        (train_start=Date(2016,7,1), train_end=Date(2016,7,31), 
-         test_start=Date(2016,8,1), test_end=Date(2016,8,31)),
-         
-        # Recuperação Lenta - Junho 2018 (Pós-recessão)
-        (train_start=Date(2018,5,1), train_end=Date(2018,5,31), 
-         test_start=Date(2018,6,1), test_end=Date(2018,6,30)),
-        
-        # Pandemia - Março 2020 (Choque COVID)
-        (train_start=Date(2020,2,1), train_end=Date(2020,2,29), 
-         test_start=Date(2020,3,1), test_end=Date(2020,3,31)),
-         
-        # Alta Inflação - Março 2022 (Pressões inflacionárias)
-        (train_start=Date(2022,2,1), train_end=Date(2022,2,28), 
-         test_start=Date(2022,3,1), test_end=Date(2022,3,31)),
-         
-        # Normalização - Maio 2024 (Período recente)
-        (train_start=Date(2024,4,1), train_end=Date(2024,4,30), 
-         test_start=Date(2024,5,1), test_end=Date(2024,5,31)),
-    ]
+# Carrega blocos de treino/teste a partir do config.toml
+function get_continuous_blocks_from_config()
+    config = TOML.parsefile("config.toml")
+    cv_config = get(config, "cross_validation", Dict())
+    block_configs = get(cv_config, "blocks", [])
+
+    if isempty(block_configs)
+        error("Nenhum bloco de cross-validation definido em config.toml")
+    end
+
+    blocks = [(
+        train_start=Date(b["train_start"]),
+        train_end=Date(b["train_end"]),
+        test_start=Date(b["test_start"]),
+        test_end=Date(b["test_end"])
+    ) for b in block_configs]
     
     return blocks
 end
 
 
 # Treina modelo sequencialmente aproveitando previous_params
-@everywhere function train_sequential(pso_params::PSOHyperparams, train_dates::Vector{Date}, verbose::Bool = true)
+@everywhere function train_sequential(pso_params::PSOHyperparams, train_dates::Vector{Date}, train_max_iterations::Int, lm_max_iterations_cv::Int, verbose::Bool = true)
     best_params = nothing
     costs = Float64[]
     successful_days = 0
     
+    # Load bounds from config file inside the worker
+    config = TOML.parsefile("config.toml")
+    pso_config = get(config, "pso", Dict())
+    lower_bounds = get(pso_config, "lower_bounds", [0.01, -0.25, -0.30, -0.20, 0.5, 2.0])
+    upper_bounds = get(pso_config, "upper_bounds", [0.30, 0.25, 0.30, 0.20, 20.0, 50.0])
+
     for (day_idx, train_date) in enumerate(train_dates)
         try
             df = load_bacen_data(train_date, train_date)
@@ -122,7 +125,7 @@ end
             
             # Usa nova função MAD para otimização com liquidez
             params, cost, final_cash_flows, outliers_removed, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
-                cash_flows, train_date; 
+                cash_flows, train_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
                 temporal_penalty_weight=pso_params.temporal_penalty_weight,
                 pso_N=pso_params.N,
@@ -131,7 +134,7 @@ end
                 pso_omega=pso_params.ω,
                 pso_f_calls_limit=pso_params.f_calls_limit,
                 fator_erro=pso_params.mad_threshold,
-                max_iterations=2,  # Reduzido para velocidade
+                max_iterations=train_max_iterations,
                 fator_liq=pso_params.fator_liq,
                 bond_quantities=bond_quantities,
                 verbose=verbose
@@ -141,8 +144,8 @@ end
             if pso_params.use_lm
                 try
                     params_lm, cost_lm, lm_success = refine_nss_with_levenberg_marquardt(
-                        final_cash_flows, train_date, params;
-                        max_iterations=50, show_trace=false,
+                        final_cash_flows, train_date, params, lower_bounds, upper_bounds;
+                        max_iterations=lm_max_iterations_cv, show_trace=false,
                         previous_params=previous_params,
                         temporal_penalty_weight=pso_params.temporal_penalty_weight,
                         verbose=verbose
@@ -200,11 +203,17 @@ end
 end
 
 # Testa modelo treinado sequencialmente no período de teste
-@everywhere function test_sequential(initial_params, pso_params::PSOHyperparams, test_dates::Vector{Date}, verbose::Bool = true)
+@everywhere function test_sequential(initial_params, pso_params::PSOHyperparams, test_dates::Vector{Date}, train_max_iterations::Int, lm_max_iterations_cv::Int, stability_vertices::Vector{Float64}, verbose::Bool = true)
     test_costs = Float64[]
     test_params_history = []
     successful_days = 0
     current_params = initial_params
+
+    # Load bounds from config file inside the worker
+    config = TOML.parsefile("config.toml")
+    pso_config = get(config, "pso", Dict())
+    lower_bounds = get(pso_config, "lower_bounds", [0.01, -0.25, -0.30, -0.20, 0.5, 2.0])
+    upper_bounds = get(pso_config, "upper_bounds", [0.30, 0.25, 0.30, 0.20, 20.0, 50.0])
     
     for (day_idx, test_date) in enumerate(test_dates)
         try
@@ -225,7 +234,7 @@ end
             
             # Usa nova função MAD para otimização com liquidez (obtém parâmetros)
             params, optimization_cost, final_cash_flows, outliers_removed, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
-                cash_flows, test_date;
+                cash_flows, test_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
                 temporal_penalty_weight=pso_params.temporal_penalty_weight,
                 pso_N=pso_params.N,
@@ -233,7 +242,7 @@ end
                 pso_C2=pso_params.C2,
                 pso_omega=pso_params.ω,
                 pso_f_calls_limit=pso_params.f_calls_limit,
-                max_iterations=2,  # Reduzido para velocidade
+                max_iterations=train_max_iterations,
                 fator_erro=pso_params.mad_threshold,
                 fator_liq=pso_params.fator_liq,
                 bond_quantities=bond_quantities,
@@ -249,8 +258,8 @@ end
             if pso_params.use_lm
                 try
                     params_lm, optimization_cost_lm, lm_success = refine_nss_with_levenberg_marquardt(
-                        final_cash_flows, test_date, params;
-                        max_iterations=50, show_trace=false,
+                        final_cash_flows, test_date, params, lower_bounds, upper_bounds;
+                        max_iterations=lm_max_iterations_cv, show_trace=false,
                         previous_params=previous_params,
                         temporal_penalty_weight=pso_params.temporal_penalty_weight,
                         verbose=verbose
@@ -303,9 +312,8 @@ end
         # Normaliza pelo volume total (custo por unidade de volume)
         normalized_test_cost = total_test_volume > 0 ? total_test_cost_reais / total_test_volume : total_test_cost_reais
         
-        # Calcula estabilidade dos vértices (6M, 1Y, 3Y, 5Y, 10Y, 15Y)
-        vertices = [0.5, 1.0, 3.0, 5.0, 10.0, 15.0]
-        vertex_stability = calculate_vertex_stability(test_params_history, vertices)
+        # Calcula estabilidade dos vértices
+        vertex_stability = calculate_vertex_stability(test_params_history, stability_vertices)
         
         return (
             normalized_test_cost = normalized_test_cost,
@@ -343,11 +351,15 @@ end
 end
 
 # Processa um bloco individual (paralelizável)
-@everywhere function process_single_block(pso_params::PSOHyperparams, block, block_idx, verbose::Bool = true)
+@everywhere function process_single_block(pso_params::PSOHyperparams, block, block_idx, cv_config::Dict, verbose::Bool = true)
     worker_id = myid()
     
+    train_max_iterations = get(cv_config, "train_max_iterations", 2)
+    lm_max_iterations_cv = get(cv_config, "lm_max_iterations_cv", 50)
+    stability_vertices = get(cv_config, "stability_vertices", [0.5, 1.0, 3.0, 5.0, 10.0, 15.0])
+
     if verbose
-        print("🔧 Worker $worker_id: [$block_idx/6] ")
+        print("🔧 Worker $worker_id: [$block_idx/$(length(cv_config["blocks"]))] ")
         print("Treino: $(block.train_start) a $(block.train_end), ")
         print("Teste: $(block.test_start) a $(block.test_end) ")
     end
@@ -364,7 +376,7 @@ end
     end
     
     # TREINO: Sequencial com previous_params
-    trained_params, train_cost, train_days = train_sequential(pso_params, train_dates, verbose)
+    trained_params, train_cost, train_days = train_sequential(pso_params, train_dates, train_max_iterations, lm_max_iterations_cv, verbose)
     
     if trained_params === nothing || train_days < 3
         if verbose
@@ -374,7 +386,7 @@ end
     end
     
     # TESTE: Avalia parâmetros treinados sequencialmente
-    test_result = test_sequential(trained_params, pso_params, test_dates, verbose)
+    test_result = test_sequential(trained_params, pso_params, test_dates, train_max_iterations, lm_max_iterations_cv, stability_vertices, verbose)
     
     if test_result === nothing
         if verbose
@@ -401,20 +413,34 @@ end
 end
 
 # Walk-forward para uma configuração PSO - VERSÃO PARALELA
-function continuous_walkforward_single_config(pso_params::PSOHyperparams, blocks)
+function continuous_walkforward_single_config(pso_params::PSOHyperparams, blocks, cv_config::Dict)
     config_name = "N=$(pso_params.N)_C1=$(round(pso_params.C1,digits=2))_LM=$(pso_params.use_lm)_TW=$(round(pso_params.temporal_penalty_weight,digits=4))_MAD=$(pso_params.mad_threshold)_LIQ=$(pso_params.fator_liq)"
     
     # Mensagem simplificada - removida a redundante
     println("   🔄 Distribuindo $(length(blocks)) blocos entre $(nworkers()) workers...")
     
     # PARALELIZAÇÃO ROBUSTA: Usa pmap em vez de @distributed para melhor tratamento de erros
-    block_tasks = [(pso_params, blocks[i], i, false) for i in 1:length(blocks)]
+    block_tasks = [(pso_params, blocks[i], i, cv_config, false) for i in 1:length(blocks)]
     results_list = pmap(args -> process_single_block(args...), block_tasks)
     results_raw = filter(x -> x !== nothing, results_list)
     
     println("   ✅ Blocos processados: $(length(results_raw))/$(length(blocks))")
     
     return (pso_params, results_raw)
+end
+
+# Helper function to calculate the simplified hybrid score for Bayesian optimization
+function _calculate_bayesian_score(avg_test_cost, avg_vertex_stability, overfitting_ratio, config)
+    scaling_config = get(get(config, "cross_validation", Dict()), "bayesian_objective_scaling", Dict())
+    cost_scale = get(scaling_config, "cost_score", 50.0)
+    stability_scale = get(scaling_config, "stability_score", 20.0)
+    overfitting_penalty_mult = get(scaling_config, "overfitting_penalty", 2.0)
+
+    cost_score = avg_test_cost / cost_scale
+    stability_score = avg_vertex_stability / stability_scale
+    overfitting_penalty = max(0, overfitting_ratio - 1.0) * overfitting_penalty_mult
+
+    return cost_score + stability_score + overfitting_penalty
 end
 
 # Função objetivo para Otimização Bayesiana
@@ -471,8 +497,9 @@ function bayesian_objective(params_vector)
     end
     
     # Executa walk-forward para esta configuração
-    blocks = get_continuous_blocks()
-    _, results = continuous_walkforward_single_config(pso_params, blocks)
+    cv_config = get(config, "cross_validation", Dict())
+    blocks = get_continuous_blocks_from_config()
+    _, results = continuous_walkforward_single_config(pso_params, blocks, cv_config)
     
     # Calcula métricas agregadas (não normalizadas ainda)
     test_costs = [r.normalized_test_cost for r in results if r.normalized_test_cost > 0]
@@ -496,13 +523,7 @@ function bayesian_objective(params_vector)
     
     overfitting_ratio = avg_test_cost / avg_train_cost
     
-    # Score híbrido simplificado (sem normalização entre configurações)
-    # Usar fatores de escala baseados nos valores históricos típicos
-    cost_score = avg_test_cost / 50.0  # Escala baseada em custos típicos
-    stability_score = avg_vertex_stability / 20.0  # Escala baseada em estabilidade típica
-    overfitting_penalty = max(0, overfitting_ratio - 1.0) * 2.0  # Penaliza overfitting
-    
-    simple_score = cost_score + stability_score + overfitting_penalty
+    simple_score = _calculate_bayesian_score(avg_test_cost, avg_vertex_stability, overfitting_ratio, config)
     
     # Armazena resultado completo para análise posterior
     result_data = Dict(
@@ -530,15 +551,17 @@ end
 function run_continuous_walkforward()
     println("⚙️  Configurando walk-forward contínuo com OTIMIZAÇÃO BAYESIANA...")
     
-    # Carrega configuração do arquivo TOML usando TOML diretamente
+    # Carrega configuração do arquivo TOML
     config = TOML.parsefile("config.toml")
-    num_evaluations = config["validation"]["num_hyperparameter_configs"]
+    validation_config = get(config, "validation", Dict())
+    cv_config = get(config, "cross_validation", Dict())
+    num_evaluations = get(validation_config, "num_hyperparameter_configs", 20)
     
-    blocks = get_continuous_blocks()
+    blocks = get_continuous_blocks_from_config()
     
     println("📊 Blocos contínuos: $(length(blocks))")
     println("📊 Avaliações Bayesianas: $num_evaluations")
-    println("📊 Cada bloco: 30 dias treino → 30 dias teste")
+    println("📊 Cada bloco: 30 dias treino → 30 dias teste (conforme config.toml)")
     println("📊 Espaço de busca:")
     println("   • N ∈ [30, 150] (população PSO)")
     println("   • C1 ∈ [0.5, 3.5] (aceleração cognitiva)")
@@ -661,10 +684,11 @@ function run_continuous_walkforward()
             inv_stab = max(inv_stab, eps())
             inv_over = max(inv_over, eps())
     
-            # Weights (sum = 1). Adjust as needed.
-            w_test = 0.5
-            w_stab = 0.3
-            w_over = 0.2
+            # Weights from config
+            weights_config = get(cv_config, "hybrid_score_weights", Dict("test" => 0.5, "stability" => 0.3, "overfitting" => 0.2))
+            w_test = get(weights_config, "test", 0.5)
+            w_stab = get(weights_config, "stability", 0.3)
+            w_over = get(weights_config, "overfitting", 0.2)
     
             # Weighted geometric mean via log‑space (avoids underflow)
             hybrid_score = exp(w_test * log(inv_test) + w_stab * log(inv_stab) + w_over * log(inv_over))
@@ -688,8 +712,24 @@ end
 
 
 
+function _print_comparison_table(pso_avg_test, pso_test_std, pso_avg_train, pso_overfitting, pso_avg_stability, pso_score, pso_blocks,
+                                 lm_avg_test, lm_test_std, lm_avg_train, lm_overfitting, lm_avg_stability, lm_score, lm_blocks)
+    println("\n📊 RESULTADOS DA COMPARAÇÃO FINAL:")
+    println("┌─────────────────────┬─────────────────┬─────────────────┐")
+    println("│ Métrica             │ PSO Puro        │ PSO+LM          │")
+    println("├─────────────────────┼─────────────────┼─────────────────┤")
+    println("│ Custo Teste (norm.) │ $(rpad(round(pso_avg_test, digits=6), 15)) │ $(rpad(round(lm_avg_test, digits=6), 15)) │")
+    println("│ Desvio Teste        │ $(rpad(round(pso_test_std, digits=6), 15)) │ $(rpad(round(lm_test_std, digits=6), 15)) │")
+    println("│ Custo Treino (norm.)│ $(rpad(round(pso_avg_train, digits=6), 15)) │ $(rpad(round(lm_avg_train, digits=6), 15)) │")
+    println("│ Overfitting Ratio   │ $(rpad(round(pso_overfitting, digits=3), 15)) │ $(rpad(round(lm_overfitting, digits=3), 15)) │")
+    println("│ Estabilidade (bp)   │ $(rpad(round(pso_avg_stability, digits=1), 15)) │ $(rpad(round(lm_avg_stability, digits=1), 15)) │")
+    println("│ Score Híbrido       │ $(rpad(round(pso_score, digits=3), 15)) │ $(rpad(round(lm_score, digits=3), 15)) │")
+    println("│ Blocos Concluídos   │ $(rpad(pso_blocks, 15)) │ $(rpad(lm_blocks, 15)) │")
+    println("└─────────────────────┴─────────────────┴─────────────────┘")
+end
+
 # Comparação final PSO vs PSO+LM usando melhor configuração encontrada
-function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams)
+function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::Dict)
     println("\n" * "=" ^ 80)
     println("🥊 COMPARAÇÃO FINAL: PSO PURO vs PSO+LM")
     println("=" ^ 80)
@@ -697,7 +737,7 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams)
     println("⚙️  Config base: N=$(best_pso_params.N), C1=$(best_pso_params.C1), C2=$(best_pso_params.C2), ω=$(best_pso_params.ω)")
     println("🔧 Parâmetros: TW=$(best_pso_params.temporal_penalty_weight), MAD=$(best_pso_params.mad_threshold), LIQ=$(best_pso_params.fator_liq)")
     
-    blocks = get_continuous_blocks()
+    blocks = get_continuous_blocks_from_config()
     
     # Cria duas versões: PSO puro e PSO+LM
     pso_only_params = PSOHyperparams(
@@ -725,10 +765,10 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams)
     )
     
     println("\n🚀 Executando validação cruzada para PSO PURO...")
-    _, pso_results = continuous_walkforward_single_config(pso_only_params, blocks)
+    _, pso_results = continuous_walkforward_single_config(pso_only_params, blocks, cv_config)
     
     println("\n🚀 Executando validação cruzada para PSO+LM...")
-    _, pso_lm_results = continuous_walkforward_single_config(pso_lm_params, blocks)
+    _, pso_lm_results = continuous_walkforward_single_config(pso_lm_params, blocks, cv_config)
     
     # Calcula métricas para ambos
     pso_test_costs = [r.normalized_test_cost for r in pso_results if r.normalized_test_cost > 0]
@@ -759,21 +799,15 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams)
     lm_overfitting = lm_avg_test / lm_avg_train
     
     # Score híbrido simplificado para comparação direta
-    pso_score = pso_avg_test + (pso_avg_stability / 20.0) + max(0, pso_overfitting - 1.0) * 2.0
-    lm_score = lm_avg_test + (lm_avg_stability / 20.0) + max(0, lm_overfitting - 1.0) * 2.0
+    scaling_config = get(cv_config, "bayesian_objective_scaling", Dict())
+    stability_scale = get(scaling_config, "stability_score", 20.0)
+    overfitting_penalty_mult = get(scaling_config, "overfitting_penalty", 2.0)
+
+    pso_score = pso_avg_test + (pso_avg_stability / stability_scale) + max(0, pso_overfitting - 1.0) * overfitting_penalty_mult
+    lm_score = lm_avg_test + (lm_avg_stability / stability_scale) + max(0, lm_overfitting - 1.0) * overfitting_penalty_mult
     
-    println("\n📊 RESULTADOS DA COMPARAÇÃO FINAL:")
-    println("┌─────────────────────┬─────────────────┬─────────────────┐")
-    println("│ Métrica             │ PSO Puro        │ PSO+LM          │")
-    println("├─────────────────────┼─────────────────┼─────────────────┤")
-    println("│ Custo Teste (norm.) │ $(rpad(round(pso_avg_test, digits=6), 15)) │ $(rpad(round(lm_avg_test, digits=6), 15)) │")
-    println("│ Desvio Teste        │ $(rpad(round(pso_test_std, digits=6), 15)) │ $(rpad(round(lm_test_std, digits=6), 15)) │")
-    println("│ Custo Treino (norm.)│ $(rpad(round(pso_avg_train, digits=6), 15)) │ $(rpad(round(lm_avg_train, digits=6), 15)) │")
-    println("│ Overfitting Ratio   │ $(rpad(round(pso_overfitting, digits=3), 15)) │ $(rpad(round(lm_overfitting, digits=3), 15)) │")
-    println("│ Estabilidade (bp)   │ $(rpad(round(pso_avg_stability, digits=1), 15)) │ $(rpad(round(lm_avg_stability, digits=1), 15)) │")
-    println("│ Score Híbrido       │ $(rpad(round(pso_score, digits=3), 15)) │ $(rpad(round(lm_score, digits=3), 15)) │")
-    println("│ Blocos Concluídos   │ $(rpad(length(pso_test_costs), 15)) │ $(rpad(length(pso_lm_test_costs), 15)) │")
-    println("└─────────────────────┴─────────────────┴─────────────────┘")
+    _print_comparison_table(pso_avg_test, pso_test_std, pso_avg_train, pso_overfitting, pso_avg_stability, pso_score, length(pso_test_costs),
+                            lm_avg_test, lm_test_std, lm_avg_train, lm_overfitting, lm_avg_stability, lm_score, length(pso_lm_test_costs))
     
     # Decisão final
     pso_wins_test = pso_avg_test < lm_avg_test
@@ -822,8 +856,25 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams)
     return winner_params, winner_result
 end
 
+function _print_bayesian_ranking_table(sorted_results)
+    println("\n📊 RANKING OTIMIZAÇÃO BAYESIANA POR SCORE HÍBRIDO NORMALIZADO (média across regimes):")
+    for (rank, (params, result)) in enumerate(sorted_results)
+        lm_icon = params.use_lm ? "✅" : "❌"
+        hybrid_score = result.hybrid_score_normalized
+
+        println("  $rank. N=$(params.N), C1=$(round(params.C1,digits=2)), C2=$(round(params.C2,digits=2)), ω=$(round(params.ω,digits=2)), LM=$lm_icon, TW=$(round(params.temporal_penalty_weight,digits=4)), MAD=$(round(params.mad_threshold,digits=3)), LIQ=$(round(params.fator_liq,digits=4))")
+        println("     🏆 Score HÍBRIDO: $(round(hybrid_score, digits=3)) (quanto MAIOR melhor - 0-1)")
+        println("     🎯 Teste normalizado: $(round(result.avg_test_cost_normalized, digits=6)) ± $(round(result.test_cost_std, digits=6))")
+        println("     🌊 Estabilidade: $(round(result.avg_vertex_stability, digits=1)) ± $(round(result.stability_std, digits=1)) bp/dia")
+        println("     📚 Treino normalizado: $(round(result.avg_train_cost_normalized, digits=6))")
+        println("     📊 Overfitting: $(round(result.overfitting_ratio, digits=3)) ($(result.overfitting_ratio < 1.15 ? "✅ Bom" : result.overfitting_ratio < 1.3 ? "⚠️ Médio" : "❌ Alto"))")
+        println("     📦 Regimes: $(result.blocks_completed)/$(result.regimes_tested)")
+        println()
+    end
+end
+
 # Análise dos resultados da busca Bayesiana (PSO puro)
-function analyze_continuous_results(results)
+function analyze_continuous_results(results, cv_config)
     if isempty(results)
         println("❌ Nenhum resultado para analisar")
         return
@@ -839,22 +890,7 @@ function analyze_continuous_results(results)
     # Ordena por score híbrido (decrescente - maior score primeiro)
     sorted_results = sort(collect(results), by=x->x[2].hybrid_score_normalized, rev=true)
     
-    println("\n📊 RANKING OTIMIZAÇÃO BAYESIANA POR SCORE HÍBRIDO NORMALIZADO (média across regimes):")
-    for (rank, (params, result)) in enumerate(sorted_results)
-        lm_icon = params.use_lm ? "✅" : "❌"
-        
-        # Usa score híbrido já calculado
-        hybrid_score = result.hybrid_score_normalized
-        
-        println("  $rank. N=$(params.N), C1=$(round(params.C1,digits=2)), C2=$(round(params.C2,digits=2)), ω=$(round(params.ω,digits=2)), LM=$lm_icon, TW=$(round(params.temporal_penalty_weight,digits=4)), MAD=$(round(params.mad_threshold,digits=3)), LIQ=$(round(params.fator_liq,digits=4))")
-        println("     🏆 Score HÍBRIDO: $(round(hybrid_score, digits=3)) (quanto MAIOR melhor - 0-1)")
-        println("     🎯 Teste normalizado: $(round(result.avg_test_cost_normalized, digits=6)) ± $(round(result.test_cost_std, digits=6))")
-        println("     🌊 Estabilidade: $(round(result.avg_vertex_stability, digits=1)) ± $(round(result.stability_std, digits=1)) bp/dia")
-        println("     📚 Treino normalizado: $(round(result.avg_train_cost_normalized, digits=6))")
-        println("     📊 Overfitting: $(round(result.overfitting_ratio, digits=3)) ($(result.overfitting_ratio < 1.15 ? "✅ Bom" : result.overfitting_ratio < 1.3 ? "⚠️ Médio" : "❌ Alto"))")
-        println("     📦 Regimes: $(result.blocks_completed)/$(result.regimes_tested)")
-        println()
-    end
+    _print_bayesian_ranking_table(sorted_results)
     
     # Análise PSO vs PSO+LM
     pso_only = [(p, r) for (p, r) in sorted_results if !p.use_lm]
@@ -928,9 +964,11 @@ end
 
 function main()
     println("🚀 Iniciando walk-forward contínuo...")
+    config = TOML.parsefile("config.toml")
+    cv_config = get(config, "cross_validation", Dict())
     results, elapsed_time, num_configs = run_continuous_walkforward()
 
-    analyze_continuous_results(results)
+    analyze_continuous_results(results, cv_config)
     
     # Executa comparação final PSO vs PSO+LM usando melhor configuração
     final_winner_params = nothing
@@ -945,7 +983,7 @@ function main()
         println("\n🎯 EXECUTANDO COMPARAÇÃO FINAL PSO vs PSO+LM...")
         println("Usando melhor configuração PSO encontrada: N=$(best_pso_params.N), C1=$(best_pso_params.C1), etc.")
         
-        final_winner_params, final_winner_result = final_pso_vs_lm_comparison(best_pso_params)
+        final_winner_params, final_winner_result = final_pso_vs_lm_comparison(best_pso_params, cv_config)
         
         if final_winner_params === nothing
             println("⚠️  Falha na comparação final - usando melhor resultado da busca Bayesiana")

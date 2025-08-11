@@ -5,7 +5,7 @@ This module contains the core optimization algorithms for Nelson-Siegel-Svensson
 yield curve estimation, including PSO and Levenberg-Marquardt methods.
 """
 
-using Random, LsqFit, HTTP, JSON, LinearAlgebra, Statistics
+using Random, HTTP, JSON, LinearAlgebra, Statistics, Optim, Metaheuristics
 
 # --- Includes ---
 include("financial_math.jl")
@@ -13,96 +13,204 @@ include("outlier_detection.jl") # Added to access outlier functions
 
 # --- Funções de Otimização e Estimação ---
 
+"""
+    calculate_nss_cost(params, cash_flows_with_times, selic_rate, previous_params, temporal_penalty_weight) -> Float64
+
+Calculates the unified cost for a given set of NSS parameters.
+
+This function is the single source of truth for the cost metric, used by
+both PSO and LM optimizers to ensure consistency.
+
+The cost includes:
+- Weighted pricing error of the bond portfolio.
+- Penalty for violating no-arbitrage conditions.
+- Penalty for being outside of reasonable parameter bounds.
+- Penalty for deviating from the daily SELIC rate.
+- Penalty for lack of temporal continuity from previous day's parameters.
+"""
+function calculate_nss_cost(params::Vector{Float64},
+                            cash_flows_with_times::Vector,
+                            selic_rate::Float64,
+                            previous_params::Union{Vector{Float64}, Nothing},
+                            temporal_penalty_weight::Float64)
+    # Penalty #1: No-arbitrage discount factor validity
+    if !validate_discount_factors(params)
+        return 1e9
+    end
+
+    # Penalty for NaN, Inf, or extreme parameters
+    if any(isnan, params) || any(isinf, params)
+        return 1e10
+    end
+
+    # Parameter bounds penalty (soft constraint for values near zero)
+    penalty = 0.0
+    if abs(params[5]) < 0.005 || abs(params[6]) < 0.005
+        penalty += 1000.0
+    end
+
+    # SELIC constraint penalty: r(1 day) should be close to SELIC
+    t_1day = 1/252
+    model_rate_1day = nss_rate(t_1day, params)
+    selic_penalty = 1000000.0 * (model_rate_1day - selic_rate)^2
+
+    # Temporal continuity penalty (functional style)
+    temporal_penalty = 0.0
+    if previous_params !== nothing
+        temporal_vertices = [0.5, 1.0, 3.0, 5.0, 10.0]
+        temporal_penalty = temporal_penalty_weight * sum((nss_rate(t, params) - nss_rate(t, previous_params))^2 for t in temporal_vertices)
+    end
+
+    # Pricing error (functional style)
+    pricing_errors = map(cash_flows_with_times) do (market_price, cf_with_times)
+        isempty(cf_with_times) && return (0.0, 0.0)
+
+        theoretical_price = sum(amount * exp(-nss_rate(t, params) * t) for (t, amount) in cf_with_times if t > 0)
+
+        (isnan(theoretical_price) || isinf(theoretical_price) || theoretical_price <= 0.0) && return (1e12, 1.0) # Return high cost and weight
+
+        duration = theoretical_price > 0 ? sum(t * amount * exp(-nss_rate(t, params) * t) for (t, amount) in cf_with_times if t > 0) / theoretical_price : 0.1
+        weight = 1.0 / sqrt(max(duration, 0.1))
+
+        error_sq = (theoretical_price - market_price)^2
+        return (weight * error_sq, weight)
+    end
+
+    total_weighted_cost = sum(e[1] for e in pricing_errors)
+    total_weight = sum(e[2] for e in pricing_errors)
+
+    cost_bonds = total_weight > 0 ? total_weighted_cost / total_weight : 1e12
+
+    return cost_bonds + penalty + selic_penalty + temporal_penalty
+end
+
+
 # Note: The functions remove_outliers and the original detect_outliers_mad_and_liquidity
 # have been removed from this file to eliminate duplication.
 # They are now centralized in outlier_detection.jl.
 
 # Global cache for SELIC rates
 const SELIC_CACHE = Dict{Date, Float64}()
+const SELIC_CACHE_PATH = joinpath(@__DIR__, "..", "raw", "selic_cache.json")
+const SELIC_CACHE_LOADED = Ref(false)
+
+# Helper to load the SELIC cache from a persistent file
+function _load_selic_cache()
+    if !isfile(SELIC_CACHE_PATH)
+        return # No cache file yet
+    end
+    try
+        json_str = read(SELIC_CACHE_PATH, String)
+        if isempty(json_str)
+            return
+        end
+        cached_data = JSON.parse(json_str)
+        for (date_str, rate) in cached_data
+            date = Date(date_str, "yyyy-mm-dd")
+            SELIC_CACHE[date] = rate
+        end
+    catch e
+        @warn "Could not load SELIC cache from $(SELIC_CACHE_PATH): $e"
+    end
+end
+
+# Helper to save the SELIC cache to a persistent file
+function _save_selic_cache()
+    try
+        # Prepare data with string keys for JSON compatibility
+        to_save = Dict{String, Float64}(Dates.format(d, "yyyy-mm-dd") => r for (d, r) in SELIC_CACHE)
+        open(SELIC_CACHE_PATH, "w") do f
+            JSON.print(f, to_save, 4) # Use 4-space indent for readability
+        end
+    catch e
+        @warn "Could not save SELIC cache to $(SELIC_CACHE_PATH): $e"
+    end
+end
+
+
+# Fetches a single SELIC rate from the BACEN API for a given date.
+function _fetch_selic_from_api(date::Date; verbose::Bool=true)
+    date_str = Dates.format(date, "dd/mm/yyyy")
+    url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados?formato=json&dataInicial=$(date_str)&dataFinal=$(date_str)"
+
+    try
+        if verbose; @info "Fetching SELIC (series 432) from BACEN for $(date)..."; end
+        response = HTTP.get(url; readtimeout=10, retries=2)
+
+        content_type = HTTP.header(response, "Content-Type", "")
+        if !contains(content_type, "application/json")
+            body_preview = String(response.body)[1:min(100, end)]
+            @warn "Unexpected content type for $(date): $(content_type). Body: '$(body_preview)'"
+            return nothing
+        end
+
+        data = JSON.parse(String(response.body))
+
+        if !isempty(data)
+            selic_value = data[1]["valor"]
+            return parse(Float64, selic_value) / 100.0
+        end
+    catch e
+        @warn "Error fetching SELIC for $(date): $(e)."
+    end
+
+    return nothing
+end
 
 """
     get_selic_rate(date::Date) -> Float64
 
-Get SELIC rate for a specific date, using cache for performance.
-
-Parameters:
-- date: Date for SELIC rate lookup
-
-Returns:
-- SELIC rate as decimal (e.g., 0.1275 for 12.75%)
+Get SELIC rate for a specific date, using a persistent cache for performance.
 """
 function get_selic_rate(date::Date; max_fallback_days=10, verbose::Bool=true)
-    # 1. Checa o cache primeiro para a data original
+    # 1. Load persistent cache if not already loaded in this session
+    if !SELIC_CACHE_LOADED[]
+        _load_selic_cache()
+        SELIC_CACHE_LOADED[] = true
+    end
+
+    # 2. Check in-memory cache first
     if haskey(SELIC_CACHE, date)
-        # Força a impressão no log para monitoramento
-        if verbose
-            @info "Cache hit for SELIC on $(date): $(round(SELIC_CACHE[date]*100, digits=2))% a.a."
-        end
+        if verbose; @info "Cache hit for SELIC on $(date): $(round(SELIC_CACHE[date]*100, digits=2))% a.a."; end
         return SELIC_CACHE[date]
     end
 
-    # 2. Loop de fallback para buscar a taxa mais recente
+    # 3. If not in cache, try to fetch from API with fallback
     for i in 0:max_fallback_days
         current_date = date - Day(i)
         
-        # Otimização: se a data de fallback já está no cache, usa e encerra
+        # Check cache again for the fallback date
         if haskey(SELIC_CACHE, current_date)
             rate = SELIC_CACHE[current_date]
-            if verbose
-                @info "Fallback cache hit on $(current_date) for original date $(date). Rate: $(round(rate*100, digits=2))% a.a."
-            end
-            SELIC_CACHE[date] = rate # Cache para a data original
+            if verbose; @info "Fallback cache hit on $(current_date) for original date $(date)."; end
+            SELIC_CACHE[date] = rate # Cache for the original date to speed up future lookups
             return rate
         end
 
-        date_str = Dates.format(current_date, "dd/mm/yyyy")
-        url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados?formato=json&dataInicial=$(date_str)&dataFinal=$(date_str)"
+        # Fetch from API
+        rate = _fetch_selic_from_api(current_date; verbose=verbose)
         
-        try
-            if verbose
-                @info "Fetching SELIC (series 432) from BACEN for $(current_date)..."
-            end
-            response = HTTP.get(url; readtimeout=10, retries=2)
-            
-            # Verifica o tipo de conteúdo para evitar erros de JSON
-            content_type = HTTP.header(response, "Content-Type", "")
-            if !contains(content_type, "application/json")
-                body_preview = String(response.body)[1:min(100, end)]
-                @warn "Unexpected content type for $(current_date): $(content_type). Body: '$(body_preview)'"
-                continue # Tenta o próximo dia de fallback
-            end
-            
-            data = JSON.parse(String(response.body))
-            
-            if !isempty(data)
-                selic_value = data[1]["valor"]
-                selic_rate = parse(Float64, selic_value) / 100.0
-                
-                # Sucesso: armazena no cache para a data consultada E a data original
-                SELIC_CACHE[current_date] = selic_rate
-                SELIC_CACHE[date] = selic_rate # Cache para a data original economiza futuras buscas
-                
-                if verbose
-                    @info "SELIC found for $(current_date): $(round(selic_rate*100, digits=2))% a.a. Cached for both $(current_date) and $(date)."
-                end
-                return selic_rate
-            end
-        catch e
-            # Apenas avisa sobre o erro e continua o fallback
-            @warn "Error fetching SELIC for $(current_date): $(e). Retrying with previous day."
+        if rate !== nothing
+            if verbose; @info "API success for $(current_date): $(round(rate*100, digits=2))% a.a."; end
+            # Update cache for both dates and save to file
+            SELIC_CACHE[current_date] = rate
+            SELIC_CACHE[date] = rate
+            _save_selic_cache()
+            return rate
         end
+        if verbose; @info "API fetch failed for $(current_date), trying previous day..."; end
     end
 
-    # 3. Se o loop terminar sem sucesso, usa o último valor do cache, se houver
+    # 4. If API fails, use the most recent value from the cache
     if !isempty(SELIC_CACHE)
         latest_date = maximum(keys(SELIC_CACHE))
         rate = SELIC_CACHE[latest_date]
-        @warn "API fetch failed after $(max_fallback_days) days. Using most recent cached rate from $(latest_date): $(round(rate*100, digits=2))% a.a."
+        @warn "API fetch failed after $(max_fallback_days) days. Using most recent cached rate from $(latest_date)."
         return rate
     end
     
-    # 4. Fallback final se o cache estiver vazio
-    default_rate = 0.1275 # 12.75%
+    # 5. Absolute fallback if API and cache fail
+    default_rate = 0.105 # 10.5% as a more recent default
     @error "CRITICAL: SELIC rate fetch failed completely and cache is empty. Using default rate: $(round(default_rate*100, digits=2))% a.a."
     return default_rate
 end
@@ -130,7 +238,7 @@ Returns:
 - best_params: Optimal NSS parameters
 - best_cost: Optimal cost value
 """
-function optimize_pso_nss(cash_flows, ref_date; 
+function optimize_pso_nss(cash_flows, ref_date, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
                          previous_params=nothing, temporal_penalty_weight=0.01,
                          pso_N=50, pso_C1=2.0, pso_C2=2.0, pso_omega=0.5, pso_f_calls_limit=1500,
                          verbose::Bool=true)
@@ -149,157 +257,22 @@ function optimize_pso_nss(cash_flows, ref_date;
         push!(cash_flows_with_times, (market_price, cf_with_times))
     end
     
-    # Define objective function
-    function objective(params)
-        # Penalidade #1: Validade dos fatores de desconto (sem arbitragem)
-        if !validate_discount_factors(params)
-            return 1e9
-        end
+    # Wrapper for the unified cost function
+    objective(params) = calculate_nss_cost(params, cash_flows_with_times, selic_rate, previous_params, temporal_penalty_weight)
 
-        # Penalty for negative or extreme parameters
-        if any(isnan, params) || any(isinf, params)
-            return 1e10
-        end
-        
-        # Parameter bounds penalty
-        penalty = 0.0
-        if abs(params[5]) < 0.005 || abs(params[6]) < 0.005  # tau constraints ajustados aos bounds
-            penalty += 1000.0
-        end
-        
-        # SELIC constraint: r(1 day) should be close to SELIC
-        t_1day = 1/252  # 1 dia útil em anos (igual ao LM)
-        model_rate_1day = nss_rate(t_1day, params)
-        selic_penalty = 1000000.0 * (model_rate_1day - selic_rate)^2  # Peso máximo para aderência extrema SELIC
-        
-        # Temporal continuity penalty - usando vértices como no LM
-        temporal_penalty = 0.0
-        if previous_params !== nothing
-            temporal_vertices = [0.5, 1.0, 3.0, 5.0, 10.0]  # Igual ao LM
-            for t in temporal_vertices
-                rate_current = nss_rate(t, params)
-                rate_previous = nss_rate(t, previous_params)
-                temporal_penalty += (rate_current - rate_previous)^2
-            end
-            temporal_penalty *= temporal_penalty_weight
-        end
-        
-        # Pricing error - using continuous compounding
-        total_cost = 0.0
-        total_weight = 0.0
-        
-        for (market_price, cf_with_times) in cash_flows_with_times
-            if isempty(cf_with_times)
-                continue
-            end
+    # Set up Metaheuristics.jl
+    options = Options(f_calls_limit = pso_f_calls_limit, store_convergence = false, verbose=verbose)
 
-            # Pre-calculated theoretical price with continuous compounding
-            theoretical_price = sum(amount * exp(-nss_rate(t, params) * t) for (t, amount) in cf_with_times if t > 0)
+    # Use previous_params as a starting point if available
+    x0 = previous_params !== nothing ? previous_params : nothing
 
-            # Handle potential invalid price calculation
-            if isnan(theoretical_price) || isinf(theoretical_price) || theoretical_price <= 0.0
-                return 1e12 # Add a large penalty and continue
-            end
+    # Define the PSO algorithm with parameters from config
+    pso_algorithm = PSO(N = pso_N, C1 = pso_C1, C2 = pso_C2, ω = pso_omega, x0 = x0)
 
-            # Duration-based weighting (pre-calculated) with continuous compounding
-            if theoretical_price > 0
-                duration = sum(t * amount * exp(-nss_rate(t, params) * t) for (t, amount) in cf_with_times if t > 0) / theoretical_price
-            else
-                duration = 0.1 # Fallback for invalid price
-            end
-            weight = 1.0 / sqrt(max(duration, 0.1))
-            
-            # Weighted squared pricing error
-            error_abs = theoretical_price - market_price
-            total_cost += weight * error_abs^2
-            total_weight += weight
-        end
-        
-        # Normaliza custo dos títulos (igual ao LM)
-        cost_bonds = total_weight > 0 ? total_cost / total_weight : 1e12
-        
-        return cost_bonds + penalty + selic_penalty + temporal_penalty
-    end
-    
-    # PSO bounds (formato decimal: 0.01 = 1%)
-    # Beta0: taxa longa (1% a 30%), Beta1: slope (±25%), Beta2/Beta3: curvaturas (±30%/±20%)
-    lower_bounds = [0.01, -0.25, -0.30, -0.20, 0.5, 2.0]
-    upper_bounds = [0.30, 0.25, 0.30, 0.20, 20.0, 50.0]
-    
-    # Initialize particles
-    n_params = 6
-    particles = zeros(pso_N, n_params)
-    velocities = zeros(pso_N, n_params)
-    personal_best = zeros(pso_N, n_params)
-    personal_best_scores = fill(Inf, pso_N)
-    
-    # Initialize with previous params if available
-    if previous_params !== nothing
-        particles[1, :] = previous_params + 0.01 * randn(n_params)
-    end
-    
-    # Random initialization for other particles
-    for i in (previous_params !== nothing ? 2 : 1):pso_N
-        for j in 1:n_params
-            particles[i, j] = lower_bounds[j] + rand() * (upper_bounds[j] - lower_bounds[j])
-        end
-    end
-    
-    # Evaluate initial particles
-    for i in 1:pso_N
-        score = objective(particles[i, :])
-        if score < personal_best_scores[i]
-            personal_best_scores[i] = score
-            personal_best[i, :] = particles[i, :]
-        end
-    end
-    
-    # Find global best
-    global_best_score = minimum(personal_best_scores)
-    global_best_idx = argmin(personal_best_scores)
-    global_best = copy(personal_best[global_best_idx, :])
-    
-    # PSO main loop
-    evaluations = pso_N
-    while evaluations < pso_f_calls_limit
-        for i in 1:pso_N
-            # Update velocity
-            r1, r2 = rand(2)
-            velocities[i, :] = pso_omega * velocities[i, :] + 
-                              pso_C1 * r1 * (personal_best[i, :] - particles[i, :]) + 
-                              pso_C2 * r2 * (global_best - particles[i, :])
-            
-            # Update position
-            particles[i, :] += velocities[i, :]
-            
-            # Apply bounds
-            for j in 1:n_params
-                particles[i, j] = clamp(particles[i, j], lower_bounds[j], upper_bounds[j])
-            end
-            
-            # Evaluate
-            score = objective(particles[i, :])
-            evaluations += 1
-            
-            # Update personal best
-            if score < personal_best_scores[i]
-                personal_best_scores[i] = score
-                personal_best[i, :] = particles[i, :]
-                
-                # Update global best
-                if score < global_best_score
-                    global_best_score = score
-                    global_best = copy(particles[i, :])
-                end
-            end
-            
-            if evaluations >= pso_f_calls_limit
-                break
-            end
-        end
-    end
-    
-    return global_best, global_best_score
+    # Run the optimization
+    result = Metaheuristics.optimize(objective, [lower_bounds, upper_bounds], pso_algorithm, options)
+
+    return minimizer(result), minimum(result)
 end
 
 """
@@ -323,7 +296,7 @@ Returns:
 - final_cost: Final cost value
 - success: Whether optimization converged successfully
 """
-function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params;
+function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
                                              max_iterations=100,
                                              show_trace=false,
                                              previous_params=nothing,
@@ -331,130 +304,43 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params;
                                              verbose::Bool=true)
 
     if verbose
-        println("🔧 Aplicando refinamento Levenberg-Marquardt via LsqFit.jl...")
+        println("🔧 Aplicando refinamento com Otimizador de Box (L-BFGS) via Optim.jl...")
     end
     
     selic_rate = get_selic_rate(ref_date; verbose=verbose)
-    temporal_vertices = [0.5, 1.0, 3.0, 5.0, 10.0]
 
-    # The residuals function is the core of the optimization problem.
-    # LsqFit minimizes the sum of squares of the returned vector.
-    function residuals_function(params)
-        residuals = Float64[]
-
-        # Return a large value if parameters are invalid, to guide the solver
-        if !validate_discount_factors(params)
-            return fill(1e9, length(cash_flows) + 1 + (previous_params !== nothing ? length(temporal_vertices) : 0))
-        end
-
-        # Pricing residuals (weighted)
-        total_weight = 0.0
-        pricing_residuals = Float64[]
-        for (market_price, cash_flow) in cash_flows
-            theoretical_price = price_bond(cash_flow, ref_date, params)
-            duration = calculate_duration(cash_flow, ref_date, params)
-            weight = 1.0 / sqrt(max(duration, 0.1))
-            total_weight += weight
-            
-            weighted_residual = sqrt(weight) * (theoretical_price - market_price)
-            push!(pricing_residuals, weighted_residual)
-        end
-        
-        # Normalize bond residuals
-        if total_weight > 0
-            append!(residuals, pricing_residuals / sqrt(total_weight))
-        end
-
-        # SELIC penalty residual
-        t_1day = 1/252
-        r_1day_model = nss_rate(t_1day, params)
-        selic_penalty_val = 1000000.0 * (r_1day_model - selic_rate)^2
-        push!(residuals, sqrt(selic_penalty_val))
-
-        # Temporal penalty residuals
-        if previous_params !== nothing
-            for t in temporal_vertices
-                rate_current = nss_rate(t, params)
-                rate_previous = nss_rate(t, previous_params)
-                temporal_penalty = temporal_penalty_weight * (rate_current - rate_previous)^2
-                push!(residuals, sqrt(temporal_penalty))
-            end
-        end
-        
-        return residuals
+    # Pre-calculate time fractions for performance, same as in PSO
+    cash_flows_with_times = []
+    for (market_price, cash_flow) in cash_flows
+        cf_with_times = [(yearfrac(ref_date, date), amount) for (date, amount) in cash_flow]
+        push!(cash_flows_with_times, (market_price, cf_with_times))
     end
 
-    try
-        # Use LsqFit.jl for a robust, standard Levenberg-Marquardt implementation
-        # Create dummy x data since LsqFit expects model(x, params) format
-        n_residuals = length(residuals_function(pso_params))
-        dummy_x = collect(1:n_residuals)  # dummy x data
-        
-        # Wrapper function to convert residuals to model format
-        function model_wrapper(x, params)
-            residuals = residuals_function(params)
-            return residuals  # LsqFit expects model output, not residuals
-        end
-        
-        # Target is zero residuals
-        target_y = zeros(n_residuals)
-        
-        # Use curve_fit which implements Levenberg-Marquardt internally
-        fit_result = LsqFit.curve_fit(model_wrapper, dummy_x, target_y, pso_params; 
-                                     maxIter=max_iterations, show_trace=show_trace)
-        
-        params_lm = fit_result.param
-        converged = fit_result.converged
-        
-        # --- Cost Calculation ---
-        # Recalculate the final cost using the same methodology as the PSO
-        # to ensure perfect comparability.
-        
-        # 1. Bond pricing cost
-        total_cost = 0.0
-        total_weight = 0.0
-        for (market_price, cash_flow) in cash_flows
-            theoretical_price = price_bond(cash_flow, ref_date, params_lm)
-            duration = calculate_duration(cash_flow, ref_date, params_lm)
-            weight = 1.0 / sqrt(max(duration, 0.1))
-            
-            error_sq = (theoretical_price - market_price)^2
-            total_cost += weight * error_sq
-            total_weight += weight
-        end
-        cost_bonds = total_weight > 0 ? total_cost / total_weight : 0.0
+    # The objective function is the unified cost function
+    objective(params) = calculate_nss_cost(params, cash_flows_with_times, selic_rate, previous_params, temporal_penalty_weight)
 
-        # 2. SELIC penalty
-        t_1day = 1/252
-        r_1day_model = nss_rate(t_1day, params_lm)
-        selic_penalty = 1000000.0 * (r_1day_model - selic_rate)^2
+    try
+        # Use Optim.jl with a bounded optimizer (L-BFGS in a box)
+        result = Optim.optimize(objective, lower_bounds, upper_bounds, pso_params,
+                                Fminbox(LBFGS()),
+                                Optim.Options(iterations = max_iterations, show_trace = show_trace))
         
-        # 3. Temporal penalty
-        temporal_penalty = 0.0
-        if previous_params !== nothing
-            for t in temporal_vertices
-                rate_current = nss_rate(t, params_lm)
-                rate_previous = nss_rate(t, previous_params)
-                temporal_penalty += (rate_current - rate_previous)^2
-            end
-            temporal_penalty *= temporal_penalty_weight
-        end
-        
-        cost_lm = cost_bonds + selic_penalty + temporal_penalty
+        params_lm = Optim.minimizer(result)
+        cost_lm = Optim.minimum(result)
+        converged = Optim.converged(result)
 
         if verbose
-            println("   Convergiu com LsqFit.jl: $(converged ? "✅" : "❌")")
+            println("   Convergiu com Optim.jl: $(converged ? "✅" : "❌")")
             println("   Custo LM (unificado): $(round(cost_lm, digits=6))")
         end
         
         return params_lm, cost_lm, converged
         
     catch e
-        @warn "LsqFit.jl LM optimization failed: $e. Retornando parâmetros PSO."
+        @warn "Optim.jl (L-BFGS) optimization failed: $e. Retornando parâmetros PSO."
         
-        # Fallback to calculate PSO cost for comparison
-        pso_residuals = residuals_function(pso_params)
-        pso_cost = sum(pso_residuals.^2)
+        # Fallback to calculate original PSO cost for comparison
+        pso_cost = objective(pso_params)
         
         return pso_params, pso_cost, false
     end
@@ -492,7 +378,7 @@ Returns:
 - outliers_removed: Total number of outliers removed
 - iterations_used: Number of iterations used
 """
-function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, ref_date;
+function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, ref_date, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
                                                                  previous_params=nothing,
                                                                  temporal_penalty_weight=0.01,
                                                                  pso_N=50, pso_C1=2.0, pso_C2=2.0,
@@ -534,7 +420,7 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
         pso_particles = max(pso_N ÷ 2, 20)
         if verbose; println("🔄 Fit preliminar: N=$pso_particles, calls=$pso_calls"); end
         
-        params, cost = optimize_pso_nss(current_cash_flows, ref_date;
+        params, cost = optimize_pso_nss(current_cash_flows, ref_date, lower_bounds, upper_bounds;
                                        previous_params=previous_params,
                                        temporal_penalty_weight=temporal_penalty_weight,
                                        pso_N=pso_particles, pso_C1=pso_C1, pso_C2=pso_C2,
@@ -581,7 +467,7 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
     
     if verbose; println("\n🚀 FIT FINAL INTENSIVO com $(length(current_cash_flows)) títulos limpos"); end
     
-    final_params, final_cost = optimize_pso_nss(current_cash_flows, ref_date;
+    final_params, final_cost = optimize_pso_nss(current_cash_flows, ref_date, lower_bounds, upper_bounds;
                                                previous_params=previous_params,
                                                temporal_penalty_weight=temporal_penalty_weight,
                                                pso_N=pso_N, pso_C1=pso_C1, pso_C2=pso_C2,

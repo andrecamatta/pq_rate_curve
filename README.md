@@ -51,7 +51,6 @@ julia run_continuous_walkforward_cv.jl
 ```toml
 [validation]
 num_hyperparameter_configs = 20  # Número de configurações testadas
-use_focused_search = false
 
 [pso]
 N = 80                    # Número de partículas

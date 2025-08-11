@@ -3,7 +3,7 @@
 # Creates an animated video of yield curves from the CSV output with NSS parameters
 # Usage: julia create_yield_curve_animation.jl [input_csv_file] [output_video.mp4]
 
-using CSV, DataFrames, Plots, Dates, Statistics
+using CSV, DataFrames, Plots, Dates, Statistics, TOML
 using Plots.Measures
 
 # Set plotting backend explicitly
@@ -32,8 +32,15 @@ end
 
 # Configuration
 input_file, output_video = parse_args()
-const FPS = 10  # frames per second
-const DURATION = 30  # seconds for full animation
+
+# Load configuration from config.toml
+config = isfile("config.toml") ? TOML.parsefile("config.toml") : Dict()
+anim_config = get(config, "animation", Dict())
+
+const FPS = get(anim_config, "fps", 10)
+const DURATION = get(anim_config, "duration", 30)
+const PLOT_DPI = get(anim_config, "plot_dpi", 200)
+const PLOT_SIZE = tuple(get(anim_config, "plot_size", [1200, 800])...)
 
 # NSS yield curve function
 function nss_yield(beta0, beta1, beta2, beta3, tau1, tau2, maturity)
@@ -66,8 +73,9 @@ successful_fits = df[df.Sucesso .== true, :]
 dates = successful_fits.Data
 sort!(dates)
 
-# Create maturity points (0.25 to 10 years)
-maturities = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0]
+# Create maturity points
+default_maturities = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0]
+maturities = get(anim_config, "maturities", default_maturities)
 
 # Create time points for animation
 time_points = range(1, length(dates), length=Int(round(FPS * DURATION)))
@@ -111,8 +119,8 @@ anim = @animate for i in time_points
         markersize=4,
         xlim=(0, 10.2),  # Consistent with xticks range
         ylim=(y_min, y_max),
-        dpi=200,  # Higher DPI for better quality
-        size=(1200, 800),  # Slightly taller for better proportions
+        dpi=PLOT_DPI,
+        size=PLOT_SIZE,
         xticks=(0:1:10, string.(0:1:10)),  # Explicit tick labels
         xtickfontsize=14,
         ytickfontsize=14,
