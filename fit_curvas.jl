@@ -121,8 +121,8 @@ function get_business_dates(start_date::Date, end_date::Date)
 end
 
 # Busca parâmetros de continuidade
-function find_continuity_params(start_date::Date, config::Dict{String, Any}; verbose::Bool=false)
-    if verbose
+function find_continuity_params(start_date::Date, config::Dict{String, Any}; log_level::Int=1)
+    if log_level >= 2
         println("🔍 Buscando parâmetros de continuidade antes de $start_date...")
     end
     
@@ -132,13 +132,13 @@ function find_continuity_params(start_date::Date, config::Dict{String, Any}; ver
     for _ in 1:config["continuity_search_days"]
         if Dates.dayofweek(search_date) in 1:5  # Dia útil
             try
-                if verbose
+                if log_level >= 3
                     println("   Tentando $search_date...")
                 end
                 
-                result = fit_nss_single_day(search_date, config, nothing; verbose=false)
+                result = fit_nss_single_day(search_date, config, nothing; log_level=0) # Run silently
                 if result.success
-                    if verbose
+                    if log_level >= 2
                         println("✅ Parâmetros encontrados em $search_date")
                     end
                     return result.params
@@ -150,14 +150,14 @@ function find_continuity_params(start_date::Date, config::Dict{String, Any}; ver
         search_date -= Day(1)
     end
     
-    if verbose
+    if log_level >= 2
         println("⚠️ Não foi possível encontrar parâmetros de continuidade")
     end
     return nothing
 end
 
 # Fit NSS para um dia
-function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_params::Union{Vector{Float64}, Nothing}; verbose::Bool=true, previous_cost::Union{Float64, Nothing}=nothing)
+function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_params::Union{Vector{Float64}, Nothing}; log_level::Int=1, previous_cost::Union{Float64, Nothing}=nothing)
     try
         df = load_bacen_data(date, date)
         
@@ -171,7 +171,7 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
             return DayResult(date, false, nothing, nothing, 0, 0, "Cash flows insuficientes (<$(config["min_bonds_for_fit"]))", false, false)
         end
         
-        if verbose
+        if log_level >= 1
             print("📊 $date: $(length(cash_flows)) títulos")
         end
         
@@ -187,23 +187,25 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
             pso_f_calls_limit=config["f_calls_limit"],
             fator_erro=config["mad_threshold"],
             fator_liq=config["fator_liq"],
-            bond_quantities=bond_quantities
+            bond_quantities=bond_quantities,
+            log_level=log_level
         )
         
         # Refinamento LM se configurado
         if config["use_lm"]
             try
-                params_lm, cost_lm, lm_success = refine_nss_with_levenberg_marquardt(
+                params_lm, cost_lm, lm_success = refine_nss_with_lbfgs(
                     final_cash_flows, date, params, config["lower_bounds"], config["upper_bounds"];
                     max_iterations=config["lm_max_iterations"], show_trace=false,
                     previous_params=previous_params,
-                    temporal_penalty_weight=config["temporal_penalty_weight"]
+                    temporal_penalty_weight=config["temporal_penalty_weight"],
+                    log_level=log_level
                 )
                 
                 if lm_success && cost_lm < cost
                     params = params_lm
                     cost = cost_lm
-                    if verbose
+                    if log_level >= 2
                         print(" + LM")
                     end
                 end
@@ -216,10 +218,10 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
         
         # Tenta re-otimizar se o custo for muito alto em comparação com o dia anterior
         params, cost, final_cash_flows, outliers_removed, reoptimized = _reoptimize_if_needed(
-            cost, previous_cost, config, cash_flows, date, params, final_cash_flows, outliers_removed, bond_quantities, previous_params, verbose
+            cost, previous_cost, config, cash_flows, date, params, final_cash_flows, outliers_removed, bond_quantities, previous_params, log_level
         )
         
-        if verbose
+        if log_level >= 1
             outlier_info = outliers_removed > 0 ? " (-$outliers_removed outliers)" : ""
             reopt_info = reoptimized ? " [RE-OPT]" : ""
             println(" → ✅ Custo: $(round(cost, digits=4))$outlier_info$reopt_info")
@@ -229,14 +231,14 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
         
     catch e
         error_msg = string(e)
-        if verbose
+        if log_level >= 1
             println(" → ❌ $error_msg")
         end
         return DayResult(date, false, nothing, nothing, 0, 0, error_msg, false, false)
     end
 end
 
-function _reoptimize_if_needed(cost, previous_cost, config, cash_flows, date, params, final_cash_flows, outliers_removed, bond_quantities, previous_params, verbose)
+function _reoptimize_if_needed(cost, previous_cost, config, cash_flows, date, params, final_cash_flows, outliers_removed, bond_quantities, previous_params, log_level)
     reoptimized = false
     reopt_multiplier = config["reoptimization_cost_multiplier"]
 
@@ -244,7 +246,7 @@ function _reoptimize_if_needed(cost, previous_cost, config, cash_flows, date, pa
         return params, cost, final_cash_flows, outliers_removed, reoptimized
     end
 
-    if verbose
+    if log_level >= 2
         println(" ⚠️ Custo elevado ($(round(cost, digits=4)) > $(reopt_multiplier)×$(round(previous_cost, digits=4))), re-otimizando...")
     end
 
@@ -260,21 +262,23 @@ function _reoptimize_if_needed(cost, previous_cost, config, cash_flows, date, pa
         pso_f_calls_limit=round(Int, config["f_calls_limit"] * pso_multiplier),
         fator_erro=config["mad_threshold"],
         fator_liq=config["fator_liq"],
-        bond_quantities=bond_quantities
+        bond_quantities=bond_quantities,
+        log_level=log_level
     )
 
     if config["use_lm"]
         try
-            params_lm_reopt, cost_lm_reopt, lm_success_reopt = refine_nss_with_levenberg_marquardt(
+            params_lm_reopt, cost_lm_reopt, lm_success_reopt = refine_nss_with_lbfgs(
                 final_cash_flows_reopt, date, params_reopt, config["lower_bounds"], config["upper_bounds"];
                 max_iterations=config["lm_max_iterations"], show_trace=false,
                 previous_params=previous_params,
-                temporal_penalty_weight=config["temporal_penalty_weight"]
+                temporal_penalty_weight=config["temporal_penalty_weight"],
+                log_level=log_level
             )
             if lm_success_reopt && cost_lm_reopt < cost_reopt
                 params_reopt = params_lm_reopt
                 cost_reopt = cost_lm_reopt
-                if verbose; print(" + LM-reopt"); end
+                if log_level >= 2; print(" + LM-reopt"); end
             end
         catch
             # Mantém PSO re-otimizado se LM falhar
@@ -282,10 +286,10 @@ function _reoptimize_if_needed(cost, previous_cost, config, cash_flows, date, pa
     end
 
     if cost_reopt < cost
-        if verbose; println(" 🚀 Re-otimização melhorou: $(round(cost_reopt, digits=4))"); end
+        if log_level >= 2; println(" 🚀 Re-otimização melhorou: $(round(cost_reopt, digits=4))"); end
         return params_reopt, cost_reopt, final_cash_flows_reopt, outliers_removed_reopt, true
     else
-        if verbose; println(" 😞 Re-otimização não melhorou: $(round(cost_reopt, digits=4)) >= $(round(cost, digits=4))"); end
+        if log_level >= 2; println(" 😞 Re-otimização não melhorou: $(round(cost_reopt, digits=4)) >= $(round(cost, digits=4))"); end
         return params, cost, final_cash_flows, outliers_removed, false
     end
 end
@@ -293,9 +297,9 @@ end
 
 # Fit sequencial principal
 function fit_curves_sequential(start_date::Date, end_date::Date; 
-                              find_continuity::Bool=false, verbose::Bool=true, dry_run::Bool=false)
+                              find_continuity::Bool=false, log_level::Int=1, dry_run::Bool=false)
     
-    if verbose
+    if log_level >= 1
         println("📊 FIT SEQUENCIAL DE CURVAS NSS")
         println("🔗 COM CONTINUIDADE TEMPORAL")
         println("=" ^ 50)
@@ -304,7 +308,7 @@ function fit_curves_sequential(start_date::Date, end_date::Date;
     # Carrega configuração
     config = read_optimal_config()
     
-    if verbose
+    if log_level >= 2
         println("✅ Configuração ótima:")
         println("   N=$(config["N"]), C1=$(config["C1"]), C2=$(config["C2"])")
         println("   ω=$(config["omega"]), LM=$(config["use_lm"])")
@@ -317,7 +321,7 @@ function fit_curves_sequential(start_date::Date, end_date::Date;
     all_dates = get_business_dates(start_date, end_date)
     total_dates = length(all_dates)
     
-    if verbose
+    if log_level >= 1
         println("\\n📅 Período: $start_date a $end_date")
         println("📊 Datas úteis: $total_dates")
         println("⏱️ Estimativa: $(round(total_dates * 2 / 60, digits=1)) minutos")
@@ -331,10 +335,10 @@ function fit_curves_sequential(start_date::Date, end_date::Date;
     # Busca continuidade
     previous_params = nothing
     if find_continuity
-        previous_params = find_continuity_params(start_date, config; verbose=verbose)
+        previous_params = find_continuity_params(start_date, config; log_level=log_level)
     end
     
-    if verbose
+    if log_level >= 1
         println("\\n🚀 Iniciando fit sequencial...")
     end
     
@@ -347,12 +351,12 @@ function fit_curves_sequential(start_date::Date, end_date::Date;
     reoptimization_count = 0
     
     for (i, date) in enumerate(all_dates)
-        if verbose && (i % 50 == 1 || i == total_dates)
+        if log_level >= 1 && (i % 50 == 1 || i == total_dates)
             progress_pct = round(i/total_dates*100, digits=1)
             println("🔄 Progresso: $i/$total_dates ($progress_pct%)")
         end
         
-        result = fit_nss_single_day(date, config, current_previous_params; verbose=verbose, previous_cost=current_previous_cost)
+        result = fit_nss_single_day(date, config, current_previous_params; log_level=log_level, previous_cost=current_previous_cost)
         push!(all_results, result)
         
         if result.success
@@ -368,7 +372,7 @@ function fit_curves_sequential(start_date::Date, end_date::Date;
     
     elapsed_time = time() - start_time
     
-    if verbose
+    if log_level >= 1
         println("\\n⏱️ Processamento completo em $(round(elapsed_time/60, digits=1)) minutos")
         
         continuity_count = sum(r.used_previous_params for r in all_results if r.success)
@@ -448,6 +452,13 @@ end
 
 # Função principal
 function main()
+    # --- CONFIGURAÇÃO DE LOG ---
+    # Nível 1: Progresso (Padrão)
+    # Nível 2: Informativo
+    # Nível 3: Debug Completo
+    log_level = 1
+    # -------------------------
+
     args = get_default_args()
     
     # Parse datas
@@ -468,7 +479,7 @@ function main()
         results, config = fit_curves_sequential(
             start_date, end_date;
             find_continuity=args["continuity"],
-            verbose=args["verbose"],
+            log_level=log_level,
             dry_run=args["dry-run"]
         )
         

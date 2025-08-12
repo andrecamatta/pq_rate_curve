@@ -38,6 +38,7 @@ max_cores = 8
 train_max_iterations = 2
 lm_max_iterations_cv = 50
 stability_vertices = [0.5, 1.0, 3.0, 5.0, 10.0, 15.0]
+test_cost_percentile = 95.0
 
 [cross_validation.bayesian_objective_scaling]
 cost_score = 50.0
@@ -45,9 +46,9 @@ stability_score = 20.0
 overfitting_penalty = 2.0
 
 [cross_validation.hybrid_score_weights]
-test = 0.5
+test = 0.6
 stability = 0.3
-overfitting = 0.2
+overfitting = 0.1
 
 [[cross_validation.blocks]]
 train_start = "2015-02-01"
@@ -116,7 +117,3 @@ mad_threshold_max = 12.0
 # Liquidity Factor (outlier detection)
 fator_liq_min = 0.001
 fator_liq_max = 0.015
-
-# LM Usage Probability (0=never, 1=always)
-use_lm_prob_min = 0.0
-use_lm_prob_max = 1.0

@@ -129,12 +129,12 @@ end
 
 
 # Fetches a single SELIC rate from the BACEN API for a given date.
-function _fetch_selic_from_api(date::Date; verbose::Bool=true)
+function _fetch_selic_from_api(date::Date; log_level::Int=1)
     date_str = Dates.format(date, "dd/mm/yyyy")
     url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados?formato=json&dataInicial=$(date_str)&dataFinal=$(date_str)"
 
     try
-        if verbose; @info "Fetching SELIC (series 432) from BACEN for $(date)..."; end
+        if log_level >= 2; @info "Fetching SELIC (series 432) from BACEN for $(date)..."; end
         headers = [
             "User-Agent" => "Mozilla/5.0 (compatible; Julia HTTP client)",
             "Accept" => "application/json"
@@ -166,7 +166,7 @@ end
 
 Get SELIC rate for a specific date, using a persistent cache for performance.
 """
-function get_selic_rate(date::Date; max_fallback_days=10, verbose::Bool=true)
+function get_selic_rate(date::Date; max_fallback_days=10, log_level::Int=1)
     # 1. Load persistent cache if not already loaded in this session
     if !SELIC_CACHE_LOADED[]
         _load_selic_cache()
@@ -175,7 +175,7 @@ function get_selic_rate(date::Date; max_fallback_days=10, verbose::Bool=true)
 
     # 2. Check in-memory cache first
     if haskey(SELIC_CACHE, date)
-        if verbose; @info "Cache hit for SELIC on $(date): $(round(SELIC_CACHE[date]*100, digits=2))% a.a."; end
+        if log_level >= 2; @info "Cache hit for SELIC on $(date): $(round(SELIC_CACHE[date]*100, digits=2))% a.a."; end
         return SELIC_CACHE[date]
     end
 
@@ -186,23 +186,23 @@ function get_selic_rate(date::Date; max_fallback_days=10, verbose::Bool=true)
         # Check cache again for the fallback date
         if haskey(SELIC_CACHE, current_date)
             rate = SELIC_CACHE[current_date]
-            if verbose; @info "Fallback cache hit on $(current_date) for original date $(date)."; end
+            if log_level >= 2; @info "Fallback cache hit on $(current_date) for original date $(date)."; end
             SELIC_CACHE[date] = rate # Cache for the original date to speed up future lookups
             return rate
         end
 
         # Fetch from API
-        rate = _fetch_selic_from_api(current_date; verbose=verbose)
+        rate = _fetch_selic_from_api(current_date; log_level=log_level)
         
         if rate !== nothing
-            if verbose; @info "API success for $(current_date): $(round(rate*100, digits=2))% a.a."; end
+            if log_level >= 2; @info "API success for $(current_date): $(round(rate*100, digits=2))% a.a."; end
             # Update cache for both dates and save to file
             SELIC_CACHE[current_date] = rate
             SELIC_CACHE[date] = rate
             _save_selic_cache()
             return rate
         end
-        if verbose; @info "API fetch failed for $(current_date), trying previous day..."; end
+        if log_level >= 2; @info "API fetch failed for $(current_date), trying previous day..."; end
     end
 
     # 4. If API fails, use the most recent value from the cache
@@ -245,14 +245,14 @@ Returns:
 function optimize_pso_nss(cash_flows, ref_date, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
                          previous_params=nothing, temporal_penalty_weight=0.01,
                          pso_N=50, pso_C1=2.0, pso_C2=2.0, pso_omega=0.5, pso_f_calls_limit=1500,
-                         verbose::Bool=true)
+                         log_level::Int=1)
                          
     if isempty(cash_flows)
         return zeros(6), Inf
     end
     
     # Get SELIC rate for constraint
-    selic_rate = get_selic_rate(ref_date; verbose=verbose)
+    selic_rate = get_selic_rate(ref_date; log_level=log_level)
     
     # Pre-calculate time fractions for performance
     cash_flows_with_times = []
@@ -265,7 +265,7 @@ function optimize_pso_nss(cash_flows, ref_date, lower_bounds::Vector{Float64}, u
     objective(params) = calculate_nss_cost(params, cash_flows_with_times, selic_rate, previous_params, temporal_penalty_weight)
 
     # Create options with function calls limit
-    options = Options(f_calls_limit=pso_f_calls_limit, verbose=verbose, store_convergence=false)
+    options = Options(f_calls_limit=pso_f_calls_limit, verbose=(log_level >= 3), store_convergence=false)
     
     # Define the PSO algorithm with parameters from config and options
     pso_algorithm = PSO(N = pso_N, C1 = pso_C1, C2 = pso_C2, ω = pso_omega, options = options)
@@ -278,11 +278,11 @@ function optimize_pso_nss(cash_flows, ref_date, lower_bounds::Vector{Float64}, u
 end
 
 """
-    refine_nss_with_levenberg_marquardt(cash_flows, ref_date, initial_params;
-                                       max_iterations=50, show_trace=false,
-                                       previous_params=nothing, temporal_penalty_weight=0.01) -> (Vector{Float64}, Float64, Bool)
+    refine_nss_with_lbfgs(cash_flows, ref_date, initial_params;
+                         max_iterations=50, show_trace=false,
+                         previous_params=nothing, temporal_penalty_weight=0.01) -> (Vector{Float64}, Float64, Bool)
 
-Refine NSS parameters using Levenberg-Marquardt algorithm.
+Refine NSS parameters using L-BFGS-B algorithm from Optim.jl.
 
 Parameters:
 - cash_flows: Vector of (market_price, cash_flow) tuples
@@ -298,18 +298,18 @@ Returns:
 - final_cost: Final cost value
 - success: Whether optimization converged successfully
 """
-function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
+function refine_nss_with_lbfgs(cash_flows, ref_date, pso_params, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
                                              max_iterations=100,
                                              show_trace=false,
                                              previous_params=nothing,
                                              temporal_penalty_weight=0.01,
-                                             verbose::Bool=true)
+                                             log_level::Int=1)
 
-    if verbose
+    if log_level >= 2
         println("🔧 Aplicando refinamento com Otimizador de Box (L-BFGS) via Optim.jl...")
     end
     
-    selic_rate = get_selic_rate(ref_date; verbose=verbose)
+    selic_rate = get_selic_rate(ref_date; log_level=log_level)
 
     # Pre-calculate time fractions for performance, same as in PSO
     cash_flows_with_times = []
@@ -332,13 +332,13 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, l
         # Use Optim.jl with a bounded optimizer (L-BFGS in a box)
         result = Optim.optimize(objective, expanded_lower, expanded_upper, pso_params,
                                 Fminbox(LBFGS()),
-                                Optim.Options(iterations = max_iterations, show_trace = show_trace))
+                                Optim.Options(iterations = max_iterations, show_trace = (log_level >= 3)))
         
         params_lm = Optim.minimizer(result)
         cost_lm = Optim.minimum(result)
         converged = Optim.converged(result)
 
-        if verbose
+        if log_level >= 3
             println("   Convergiu com Optim.jl: $(converged ? "✅" : "❌")")
             println("   Custo LM (unificado): $(round(cost_lm, digits=6))")
         end
@@ -395,7 +395,7 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
                                                                  fator_erro=3.0, fator_liq=0.1,
                                                                  max_iterations=5, min_bonds=3,
                                                                  bond_quantities=nothing,
-                                                                 verbose::Bool=true)
+                                                                 log_level::Int=1)
     
     if isempty(cash_flows)
         return zeros(6), Inf, [], 0, 0
@@ -405,7 +405,7 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
         bond_quantities = ones(length(cash_flows))
     end
     
-    if verbose
+    if log_level >= 2
         println("🎯 Iniciando otimização NSS com remoção iterativa de outliers (MAD + Liquidez)")
         println("   Critério duplo: Erro > $(fator_erro) × MAD E Quantidade < $(fator_liq*100)% do total")
         println("   Títulos iniciais: $(length(cash_flows))")
@@ -417,26 +417,26 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
     
     # --- Iterative Outlier Removal with Dual Criteria ---
     for iteration in 1:max_iterations
-        if verbose; println("\n--- ITERAÇÃO $iteration ---"); end
+        if log_level >= 2; println("\n--- ITERAÇÃO $iteration ---"); end
         
         if length(current_cash_flows) < min_bonds
-            if verbose; println("⚠️  Menos de $min_bonds títulos restantes. Parando."); end
+            if log_level >= 2; println("⚠️  Menos de $min_bonds títulos restantes. Parando."); end
             break
         end
         
         # Preliminary PSO fit
         pso_particles = max(pso_N ÷ 2, 20)
         pso_calls = min(pso_f_calls_limit ÷ 2, 1000)
-        if verbose; println("🔄 Fit preliminar: N=$pso_particles, calls=$pso_calls"); end
+        if log_level >= 3; println("🔄 Fit preliminar: N=$pso_particles, calls=$pso_calls"); end
         
         params, cost = optimize_pso_nss(current_cash_flows, ref_date, lower_bounds, upper_bounds;
                                        previous_params=previous_params,
                                        temporal_penalty_weight=temporal_penalty_weight,
                                        pso_N=pso_particles, pso_C1=pso_C1, pso_C2=pso_C2,
                                        pso_omega=pso_omega, pso_f_calls_limit=pso_calls,
-                                       verbose=verbose)
+                                       log_level=log_level)
         
-        if verbose; println("Custo iteração $iteration: $(round(cost, digits=6))"); end
+        if log_level >= 3; println("Custo iteração $iteration: $(round(cost, digits=6))"); end
         
         # Detect outliers using BOTH criteria simultaneously
         outlier_indices, errors, mad_value = detect_outliers_mad_and_liquidity(
@@ -447,24 +447,26 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
         error_threshold = fator_erro * mad_value
         total_quantity = sum(current_quantities)
         liquidity_threshold = fator_liq * total_quantity
-        if verbose
+        if log_level >= 3
             println("MAD = $(round(mad_value, digits=3)), Erro threshold = $(round(error_threshold, digits=2)), Liquidez threshold = $(round(liquidity_threshold, digits=1))")
         end
         
         if isempty(outlier_indices)
-            if verbose; println("✅ Nenhum outlier detectado. Processo concluído."); end
+            if log_level >= 2; println("✅ Nenhum outlier detectado. Processo concluído."); end
             break
         end
         
         # Print outlier details
         if !isempty(outlier_indices)
-            if verbose
+            if log_level >= 2
                 println("⚠️  Outliers detectados: $(length(outlier_indices)) títulos")
-                for i in outlier_indices
-                    market_price = current_cash_flows[i][1]
-                    quantity = current_quantities[i]
-                    error_val = errors[i]
-                    println("    💥 Erro=R\$$(round(error_val, digits=2)) | Qtde=$(round(quantity, digits=0)) | Preço=R\$$(round(market_price, digits=2))")
+                if log_level >= 3
+                    for i in outlier_indices
+                        market_price = current_cash_flows[i][1]
+                        quantity = current_quantities[i]
+                        error_val = errors[i]
+                        println("    💥 Erro=R\$$(round(error_val, digits=2)) | Qtde=$(round(quantity, digits=0)) | Preço=R\$$(round(market_price, digits=2))")
+                    end
                 end
                 println("🗑️  Removidos $(length(outlier_indices)) outliers. Títulos restantes: $(length(current_cash_flows) - length(outlier_indices))")
             end
@@ -474,16 +476,16 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
         total_outliers_removed += length(outlier_indices)
     end
     
-    if verbose; println("\n🚀 FIT FINAL INTENSIVO com $(length(current_cash_flows)) títulos limpos"); end
+    if log_level >= 2; println("\n🚀 FIT FINAL INTENSIVO com $(length(current_cash_flows)) títulos limpos"); end
     
     final_params, final_cost = optimize_pso_nss(current_cash_flows, ref_date, lower_bounds, upper_bounds;
                                                previous_params=previous_params,
                                                temporal_penalty_weight=temporal_penalty_weight,
                                                pso_N=pso_N, pso_C1=pso_C1, pso_C2=pso_C2,
                                                pso_omega=pso_omega, pso_f_calls_limit=pso_f_calls_limit,
-                                               verbose=verbose)
+                                               log_level=log_level)
     
-    if verbose
+    if log_level >= 2
         println("\n📊 RESUMO FINAL:")
         println("   Total de outliers removidos: $total_outliers_removed")
         println("   Títulos no fit final: $(length(current_cash_flows))")
