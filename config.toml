@@ -7,8 +7,9 @@ C1 = 1.8
 C2 = 1.3
 omega = 0.45
 f_calls_limit = 1500
-lower_bounds = [0.01, -0.25, -0.30, -0.20, 0.5, 2.0]
-upper_bounds = [0.30, 0.25, 0.30, 0.20, 20.0, 50.0]
+# Bounds balanceados: flexibilidade matemática + realismo econômico
+lower_bounds = [0.02, -0.20, -0.35, -0.35, 0.2, 0.3]
+upper_bounds = [0.40, 0.20, 0.20, 0.20, 12.0, 25.0]
 
 [optimization]
 use_lm = true
@@ -83,3 +84,39 @@ train_start = "2024-04-01"
 train_end = "2024-04-30"
 test_start = "2024-05-01"
 test_end = "2024-05-31"
+
+# Hyperparameter Search Ranges for Bayesian Optimization
+[hyperparameter_search]
+# PSO Population Size
+N_min = 25
+N_max = 80
+
+# PSO Acceleration Coefficients
+C1_min = 0.5
+C1_max = 3.5
+C2_min = 0.5
+C2_max = 3.0
+
+# PSO Inertia Weight
+omega_min = 0.1
+omega_max = 0.9
+
+# Function Calls Budget
+f_calls_min = 600
+f_calls_max = 2500
+
+# Temporal Penalty Weight (continuity between days)
+temporal_penalty_min = 0.0001
+temporal_penalty_max = 0.2
+
+# MAD Threshold (outlier detection)
+mad_threshold_min = 6.0
+mad_threshold_max = 12.0
+
+# Liquidity Factor (outlier detection)
+fator_liq_min = 0.001
+fator_liq_max = 0.015
+
+# LM Usage Probability (0=never, 1=always)
+use_lm_prob_min = 0.0
+use_lm_prob_max = 1.0

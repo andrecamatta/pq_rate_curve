@@ -570,16 +570,20 @@ function run_continuous_walkforward()
     println("📊 Blocos contínuos: $(length(blocks))")
     println("📊 Avaliações Bayesianas: $num_evaluations")
     println("📊 Cada bloco: 30 dias treino → 30 dias teste (conforme config.toml)")
-    println("📊 Espaço de busca:")
-    println("   • N ∈ [30, 150] (população PSO)")
-    println("   • C1 ∈ [0.5, 3.5] (aceleração cognitiva)")
-    println("   • C2 ∈ [0.5, 3.0] (aceleração social)")
-    println("   • ω ∈ [0.1, 0.9] (peso de inércia)")
-    println("   • f_calls ∈ {600, 900, 1200, 1500, 1800, 2500} (limite de avaliações)")
-    println("   • use_lm ∈ {true, false} (refinamento LM)")
-    println("   • temporal_penalty ∈ [0.0001, 0.1] (penalidade temporal)")
-    println("   • mad_threshold ∈ [8.0, 12.0] (limite MAD - AJUSTADO)")
-    println("   • fator_liq ∈ [0.001, 0.015] (fator liquidez - AJUSTADO)")
+    # Load hyperparameter ranges for display
+    config = TOML.parsefile("config.toml")
+    hyperparams_config = get(config, "hyperparameter_search", Dict())
+    
+    println("📊 Espaço de busca (config.toml):")
+    println("   • N ∈ [$(get(hyperparams_config, "N_min", 25)), $(get(hyperparams_config, "N_max", 80))] (população PSO)")
+    println("   • C1 ∈ [$(get(hyperparams_config, "C1_min", 0.5)), $(get(hyperparams_config, "C1_max", 3.5))] (aceleração cognitiva)")
+    println("   • C2 ∈ [$(get(hyperparams_config, "C2_min", 0.5)), $(get(hyperparams_config, "C2_max", 3.0))] (aceleração social)")
+    println("   • ω ∈ [$(get(hyperparams_config, "omega_min", 0.1)), $(get(hyperparams_config, "omega_max", 0.9))] (peso de inércia)")
+    println("   • f_calls ∈ [$(get(hyperparams_config, "f_calls_min", 600)), $(get(hyperparams_config, "f_calls_max", 2500))] (limite de avaliações)")
+    println("   • use_lm ∈ [$(get(hyperparams_config, "use_lm_prob_min", 0.0)), $(get(hyperparams_config, "use_lm_prob_max", 1.0))] (prob. refinamento LM)")
+    println("   • temporal_penalty ∈ [$(get(hyperparams_config, "temporal_penalty_min", 0.0001)), $(get(hyperparams_config, "temporal_penalty_max", 0.2))] (penalidade temporal)")
+    println("   • mad_threshold ∈ [$(get(hyperparams_config, "mad_threshold_min", 6.0)), $(get(hyperparams_config, "mad_threshold_max", 12.0))] (limite MAD)")
+    println("   • fator_liq ∈ [$(get(hyperparams_config, "fator_liq_min", 0.001)), $(get(hyperparams_config, "fator_liq_max", 0.015))] (fator liquidez)")
     println("📊 Regimes testados: Crise-Política-2015, Recessão-2016, Recuperação-2018, Pandemia-2020, Inflação-2022, Normalização-2024")
     println("📊 Método: Metaheuristics.jl with Differential Evolution + PARALELIZAÇÃO")
     println("⏱️  Estimativa: ~$(round(num_evaluations * 0.6, digits=1)) MINUTOS - Bayesian Optimization PARALELA PROFUNDA")
@@ -593,18 +597,21 @@ function run_continuous_walkforward()
     start_time = time()
     BAYESIAN_START_TIME = start_time
     
-    # Define espaço de busca para BlackBoxOptim
-    # [N, C1, C2, omega, f_calls, use_lm_prob, temporal_penalty_weight, mad_threshold, fator_liq]
+    # Load hyperparameter search ranges from config.toml
+    config = TOML.parsefile("config.toml")
+    hyperparams_config = get(config, "hyperparameter_search", Dict())
+    
+    # Define search space with values from config or sensible defaults
     search_range = [
-        (25.0, 80.0),      # N - OTIMIZADO: reduzido para velocidade (25-80 vs 30-150)
-        (0.5, 3.5),        # C1 - AMPLIADO: inclui aceleração cognitiva baixa e alta
-        (0.5, 3.0),        # C2 - AMPLIADO: inclui aceleração social baixa e alta
-        (0.1, 0.9),        # omega - AMPLIADO: explora inércia muito baixa e muito alta
-        (600.0, 2500.0),   # f_calls - range contínuo de avaliações
-        (0.0, 1.0),        # use_lm_prob (mantido)
-        (0.0001, 0.2),     # temporal_penalty_weight - EXPANDIDO: penalização muito baixa a alta (até 0.2)
-        (6.0, 12.0),       # mad_threshold - EXPANDIDO: entre 6.0 e 12.0 conforme requisito
-        (0.001, 0.015)      # fator_liq - Ajustado: entre 0.001 e 0.015 conforme requisito
+        (get(hyperparams_config, "N_min", 25.0), get(hyperparams_config, "N_max", 80.0)),
+        (get(hyperparams_config, "C1_min", 0.5), get(hyperparams_config, "C1_max", 3.5)),
+        (get(hyperparams_config, "C2_min", 0.5), get(hyperparams_config, "C2_max", 3.0)),
+        (get(hyperparams_config, "omega_min", 0.1), get(hyperparams_config, "omega_max", 0.9)),
+        (get(hyperparams_config, "f_calls_min", 600.0), get(hyperparams_config, "f_calls_max", 2500.0)),
+        (get(hyperparams_config, "use_lm_prob_min", 0.0), get(hyperparams_config, "use_lm_prob_max", 1.0)),
+        (get(hyperparams_config, "temporal_penalty_min", 0.0001), get(hyperparams_config, "temporal_penalty_max", 0.2)),
+        (get(hyperparams_config, "mad_threshold_min", 6.0), get(hyperparams_config, "mad_threshold_max", 12.0)),
+        (get(hyperparams_config, "fator_liq_min", 0.001), get(hyperparams_config, "fator_liq_max", 0.015))
     ]
     
     # Define bounds para Metaheuristics.jl
