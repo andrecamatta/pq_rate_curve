@@ -322,8 +322,15 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, l
     objective(params) = calculate_nss_cost(params, cash_flows_with_times, selic_rate, previous_params, temporal_penalty_weight)
 
     try
+        # Expand bounds slightly to avoid boundary warnings in LM
+        # PSO parameters might be exactly on the boundary, but LM needs interior positions
+        bound_expansion = 0.001  # Small expansion factor
+        range_sizes = upper_bounds .- lower_bounds
+        expanded_lower = lower_bounds .- bound_expansion .* range_sizes
+        expanded_upper = upper_bounds .+ bound_expansion .* range_sizes
+        
         # Use Optim.jl with a bounded optimizer (L-BFGS in a box)
-        result = Optim.optimize(objective, lower_bounds, upper_bounds, pso_params,
+        result = Optim.optimize(objective, expanded_lower, expanded_upper, pso_params,
                                 Fminbox(LBFGS()),
                                 Optim.Options(iterations = max_iterations, show_trace = show_trace))
         
