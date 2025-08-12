@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 
-using Distributed
+using Distributed, TOML, Logging
 
 # Configuração de workers para processamento paralelo a partir do config.toml
 function setup_workers()
@@ -17,12 +17,20 @@ end
 
 setup_workers()
 
-# 1. Carrega o módulo no processo principal
-include(joinpath(@__DIR__, "src/PQRateCurve.jl"))
+# 1. Carrega o módulo no processo principal (apenas uma vez, suprimindo warnings de docs)
+if !isdefined(Main, :PQRateCurve)
+    with_logger(NullLogger()) do
+        include(joinpath(@__DIR__, "src/PQRateCurve.jl"))
+    end
+end
 
-# 2. Importa o módulo em todos os workers
-@everywhere using Distributed
-@everywhere include(joinpath(@__DIR__, "src/PQRateCurve.jl"))
+# 2. Importa o módulo em todos os workers (suprimindo warnings de docs)
+@everywhere using Distributed, Logging
+@everywhere if !isdefined(Main, :PQRateCurve)
+    with_logger(NullLogger()) do
+        include(joinpath(@__DIR__, "src/PQRateCurve.jl"))
+    end
+end
 @everywhere using Main.PQRateCurve
 
 # 3. Carrega dependências básicas em todos os processos
@@ -124,7 +132,7 @@ end
             cash_flows, bond_quantities, _ = generate_cash_flows_with_quantity(df, train_date)
             
             # Usa nova função MAD para otimização com liquidez
-            params, cost, final_cash_flows, outliers_removed, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+            params, cost, final_cash_flows, _, _ = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
                 cash_flows, train_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
                 temporal_penalty_weight=pso_params.temporal_penalty_weight,
@@ -181,7 +189,7 @@ end
         
         # Calcula volume total negociado no período de treino para normalização
         total_train_volume = 0.0
-        for (train_date, cost) in zip(train_dates, costs)
+        for (train_date, _) in zip(train_dates, costs)
             try
                 df = load_bacen_data(train_date, train_date)
                 if nrow(df) >= 3
@@ -215,7 +223,7 @@ end
     lower_bounds = get(pso_config, "lower_bounds", [0.01, -0.25, -0.30, -0.20, 0.5, 2.0])
     upper_bounds = get(pso_config, "upper_bounds", [0.30, 0.25, 0.30, 0.20, 20.0, 50.0])
     
-    for (day_idx, test_date) in enumerate(test_dates)
+    for (_, test_date) in enumerate(test_dates)
         try
             df = load_bacen_data(test_date, test_date)
             
@@ -233,7 +241,7 @@ end
             raw_cash_flows = copy(cash_flows)
             
             # Usa nova função MAD para otimização com liquidez (obtém parâmetros)
-            params, optimization_cost, final_cash_flows, outliers_removed, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+            params, optimization_cost, final_cash_flows, _, _ = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
                 cash_flows, test_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
                 temporal_penalty_weight=pso_params.temporal_penalty_weight,
@@ -257,7 +265,7 @@ end
             # Aplica LM se solicitado
             if pso_params.use_lm
                 try
-                    params_lm, optimization_cost_lm, lm_success = refine_nss_with_levenberg_marquardt(
+                    params_lm, _, lm_success = refine_nss_with_levenberg_marquardt(
                         final_cash_flows, test_date, params, lower_bounds, upper_bounds;
                         max_iterations=lm_max_iterations_cv, show_trace=false,
                         previous_params=previous_params,
@@ -874,7 +882,7 @@ function _print_bayesian_ranking_table(sorted_results)
 end
 
 # Análise dos resultados da busca Bayesiana (PSO puro)
-function analyze_continuous_results(results, cv_config)
+function analyze_continuous_results(results, _)
     if isempty(results)
         println("❌ Nenhum resultado para analisar")
         return

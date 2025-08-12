@@ -135,7 +135,11 @@ function _fetch_selic_from_api(date::Date; verbose::Bool=true)
 
     try
         if verbose; @info "Fetching SELIC (series 432) from BACEN for $(date)..."; end
-        response = HTTP.get(url; readtimeout=10, retries=2)
+        headers = [
+            "User-Agent" => "Mozilla/5.0 (compatible; Julia HTTP client)",
+            "Accept" => "application/json"
+        ]
+        response = HTTP.get(url, headers; readtimeout=15, retries=3)  # Added headers for BACEN API
 
         content_type = HTTP.header(response, "Content-Type", "")
         if !contains(content_type, "application/json")
@@ -260,17 +264,15 @@ function optimize_pso_nss(cash_flows, ref_date, lower_bounds::Vector{Float64}, u
     # Wrapper for the unified cost function
     objective(params) = calculate_nss_cost(params, cash_flows_with_times, selic_rate, previous_params, temporal_penalty_weight)
 
-    # Set up Metaheuristics.jl
-    options = Options(f_calls_limit = pso_f_calls_limit, store_convergence = false, verbose=verbose)
-
-    # Use previous_params as a starting point if available
-    x0 = previous_params !== nothing ? previous_params : nothing
-
-    # Define the PSO algorithm with parameters from config
-    pso_algorithm = PSO(N = pso_N, C1 = pso_C1, C2 = pso_C2, ω = pso_omega, x0 = x0)
+    # Create options with function calls limit
+    options = Options(f_calls_limit=pso_f_calls_limit, verbose=verbose, store_convergence=false)
+    
+    # Define the PSO algorithm with parameters from config and options
+    pso_algorithm = PSO(N = pso_N, C1 = pso_C1, C2 = pso_C2, ω = pso_omega, options = options)
 
     # Run the optimization
-    result = Metaheuristics.optimize(objective, [lower_bounds, upper_bounds], pso_algorithm, options)
+    bounds = Metaheuristics.boxconstraints(lb=lower_bounds, ub=upper_bounds)
+    result = Metaheuristics.optimize(objective, bounds, pso_algorithm)
 
     return minimizer(result), minimum(result)
 end
@@ -416,8 +418,8 @@ function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, re
         end
         
         # Preliminary PSO fit
-        pso_calls = min(pso_f_calls_limit ÷ 2, 1000)
         pso_particles = max(pso_N ÷ 2, 20)
+        pso_calls = min(pso_f_calls_limit ÷ 2, 1000)
         if verbose; println("🔄 Fit preliminar: N=$pso_particles, calls=$pso_calls"); end
         
         params, cost = optimize_pso_nss(current_cash_flows, ref_date, lower_bounds, upper_bounds;
