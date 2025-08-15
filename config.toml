@@ -12,7 +12,7 @@ lower_bounds = [0.02, -0.20, -0.35, -0.35, 0.2, 0.3]
 upper_bounds = [0.40, 0.20, 0.20, 0.20, 12.0, 25.0]
 
 [optimization]
-use_lm = true
+use_lbfgs = true
 temporal_penalty_weight = 0.01
 
 [outlier_detection]
@@ -22,7 +22,7 @@ fator_liq = 0.015
 [fit_curves]
 continuity_search_days = 30
 min_bonds_for_fit = 3
-lm_max_iterations = 50
+lbfgs_max_iterations = 50
 reoptimization_cost_multiplier = 10.0
 reoptimization_pso_multiplier = 2.0
 
@@ -36,7 +36,7 @@ plot_size = [1200, 800]
 [cross_validation]
 max_cores = 8
 train_max_iterations = 2
-lm_max_iterations_cv = 50
+lbfgs_max_iterations_cv = 50
 stability_vertices = [0.5, 1.0, 3.0, 5.0, 10.0, 15.0]
 
 [cross_validation.bayesian_objective_scaling]
@@ -117,6 +117,6 @@ mad_threshold_max = 12.0
 fator_liq_min = 0.001
 fator_liq_max = 0.015
 
-# LM Usage Probability (0=never, 1=always)
-use_lm_prob_min = 0.0
-use_lm_prob_max = 1.0
+# L-BFGS Usage Probability (0=never, 1=always)
+use_lbfgs_prob_min = 0.0
+use_lbfgs_prob_max = 1.0

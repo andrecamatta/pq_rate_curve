@@ -42,7 +42,7 @@ using Metaheuristics
 @everywhere using Metaheuristics
 
 
-println("🎯 WALK-FORWARD CONTÍNUO PSO+LM - Blocos de 30 dias")
+println("🎯 WALK-FORWARD CONTÍNUO PSO+L-BFGS - Blocos de 30 dias")
 println("=" ^ 60)
 println("🔄 Modo: PARALELO ($(nworkers()) workers)")
 
@@ -68,7 +68,7 @@ end
     C2::Float64
     ω::Float64
     f_calls_limit::Int
-    use_lm::Bool
+    use_lbfgs::Bool
     temporal_penalty_weight::Float64
     mad_threshold::Float64
     fator_liq::Float64
@@ -103,7 +103,7 @@ end
 
 
 # Treina modelo sequencialmente aproveitando previous_params
-@everywhere function train_sequential(pso_params::PSOHyperparams, train_dates::Vector{Date}, train_max_iterations::Int, lm_max_iterations_cv::Int, verbose::Bool = true)
+@everywhere function train_sequential(pso_params::PSOHyperparams, train_dates::Vector{Date}, train_max_iterations::Int, lbfgs_max_iterations_cv::Int, verbose::Bool = true)
     best_params = nothing
     costs = Float64[]
     successful_days = 0
@@ -148,23 +148,23 @@ end
                 verbose=verbose
             )
             
-            # Aplica LM se solicitado
-            if pso_params.use_lm
+            # Aplica L-BFGS se solicitado
+            if pso_params.use_lbfgs
                 try
-                    params_lm, cost_lm, lm_success = refine_nss_with_levenberg_marquardt(
+                    params_lbfgs, cost_lbfgs, lbfgs_success = refine_nss_with_lbfgs(
                         final_cash_flows, train_date, params, lower_bounds, upper_bounds;
-                        max_iterations=lm_max_iterations_cv, show_trace=false,
+                        max_iterations=lbfgs_max_iterations_cv, show_trace=false,
                         previous_params=previous_params,
                         temporal_penalty_weight=pso_params.temporal_penalty_weight,
                         verbose=verbose
                     )
                     
-                    if lm_success && cost_lm < cost
-                        params = params_lm
-                        cost = cost_lm
+                    if lbfgs_success && cost_lbfgs < cost
+                        params = params_lbfgs
+                        cost = cost_lbfgs
                     end
                 catch
-                    # Mantém PSO se LM falhar
+                    # Mantém PSO se L-BFGS falhar
                 end
             end
             
@@ -211,7 +211,7 @@ end
 end
 
 # Testa modelo treinado sequencialmente no período de teste
-@everywhere function test_sequential(initial_params, pso_params::PSOHyperparams, test_dates::Vector{Date}, train_max_iterations::Int, lm_max_iterations_cv::Int, stability_vertices::Vector{Float64}, verbose::Bool = true)
+@everywhere function test_sequential(initial_params, pso_params::PSOHyperparams, test_dates::Vector{Date}, train_max_iterations::Int, lbfgs_max_iterations_cv::Int, stability_vertices::Vector{Float64}, verbose::Bool = true)
     test_costs = Float64[]
     test_params_history = []
     successful_days = 0
@@ -262,27 +262,27 @@ end
             raw_bond_quantities = bond_quantities[1:length(raw_cash_flows)]
             cost_reais = calculate_out_of_sample_cost_reais(raw_cash_flows, raw_bond_quantities, test_date, params)
             
-            # Aplica LM se solicitado
-            if pso_params.use_lm
+            # Aplica L-BFGS se solicitado
+            if pso_params.use_lbfgs
                 try
-                    params_lm, _, lm_success = refine_nss_with_levenberg_marquardt(
+                    params_lbfgs, _, lbfgs_success = refine_nss_with_lbfgs(
                         final_cash_flows, test_date, params, lower_bounds, upper_bounds;
-                        max_iterations=lm_max_iterations_cv, show_trace=false,
+                        max_iterations=lbfgs_max_iterations_cv, show_trace=false,
                         previous_params=previous_params,
                         temporal_penalty_weight=pso_params.temporal_penalty_weight,
                         verbose=verbose
                     )
                     
-                    # CORREÇÃO VAZAMENTO DE DADOS: Avalia LM usando dados brutos completos em reais
-                    cost_lm_reais = calculate_out_of_sample_cost_reais(raw_cash_flows, raw_bond_quantities, test_date, params_lm)
+                    # CORREÇÃO VAZAMENTO DE DADOS: Avalia L-BFGS usando dados brutos completos em reais
+                    cost_lbfgs_reais = calculate_out_of_sample_cost_reais(raw_cash_flows, raw_bond_quantities, test_date, params_lbfgs)
                     
                     # Compara custos absolutos em reais 
-                    if lm_success && abs(cost_lm_reais) < abs(cost_reais)
-                        params = params_lm
-                        cost_reais = cost_lm_reais
+                    if lbfgs_success && abs(cost_lbfgs_reais) < abs(cost_reais)
+                        params = params_lbfgs
+                        cost_reais = cost_lbfgs_reais
                     end
                 catch
-                    # Mantém PSO se LM falhar
+                    # Mantém PSO se L-BFGS falhar
                 end
             end
             
@@ -363,7 +363,7 @@ end
     worker_id = myid()
     
     train_max_iterations = get(cv_config, "train_max_iterations", 2)
-    lm_max_iterations_cv = get(cv_config, "lm_max_iterations_cv", 50)
+    lbfgs_max_iterations_cv = get(cv_config, "lbfgs_max_iterations_cv", 50)
     stability_vertices = get(cv_config, "stability_vertices", [0.5, 1.0, 3.0, 5.0, 10.0, 15.0])
 
     if verbose
@@ -384,7 +384,7 @@ end
     end
     
     # TREINO: Sequencial com previous_params
-    trained_params, train_cost, train_days = train_sequential(pso_params, train_dates, train_max_iterations, lm_max_iterations_cv, verbose)
+    trained_params, train_cost, train_days = train_sequential(pso_params, train_dates, train_max_iterations, lbfgs_max_iterations_cv, verbose)
     
     if trained_params === nothing || train_days < 3
         if verbose
@@ -394,7 +394,7 @@ end
     end
     
     # TESTE: Avalia parâmetros treinados sequencialmente
-    test_result = test_sequential(trained_params, pso_params, test_dates, train_max_iterations, lm_max_iterations_cv, stability_vertices, verbose)
+    test_result = test_sequential(trained_params, pso_params, test_dates, train_max_iterations, lbfgs_max_iterations_cv, stability_vertices, verbose)
     
     if test_result === nothing
         if verbose
@@ -422,7 +422,7 @@ end
 
 # Walk-forward para uma configuração PSO - VERSÃO PARALELA
 function continuous_walkforward_single_config(pso_params::PSOHyperparams, blocks, cv_config::Dict)
-    config_name = "N=$(pso_params.N)_C1=$(round(pso_params.C1,digits=2))_LM=$(pso_params.use_lm)_TW=$(round(pso_params.temporal_penalty_weight,digits=4))_MAD=$(pso_params.mad_threshold)_LIQ=$(pso_params.fator_liq)"
+    config_name = "N=$(pso_params.N)_C1=$(round(pso_params.C1,digits=2))_LBFGS=$(pso_params.use_lbfgs)_TW=$(round(pso_params.temporal_penalty_weight,digits=4))_MAD=$(pso_params.mad_threshold)_LIQ=$(pso_params.fator_liq)"
     
     # Mensagem simplificada - removida a redundante
     println("   🔄 Distribuindo $(length(blocks)) blocos entre $(nworkers()) workers...")
@@ -467,19 +467,19 @@ function bayesian_objective(params_vector)
     end
     
     # Extrai parâmetros do vetor
-    # [N, C1, C2, omega, f_calls, use_lm_prob, temporal_penalty_weight, mad_threshold, fator_liq]
+    # [N, C1, C2, omega, f_calls, use_lbfgs_prob, temporal_penalty_weight, mad_threshold, fator_liq]
     N = params_vector[1]
     C1 = params_vector[2]
     C2 = params_vector[3]
     omega = params_vector[4]
     f_calls_idx = params_vector[5]
-    use_lm_prob = params_vector[6]
+    use_lbfgs_prob = params_vector[6]
     temporal_penalty_weight = params_vector[7]
     mad_threshold = params_vector[8]
     fator_liq = params_vector[9]
     
-    # Converte probabilidade use_lm para booleano - FIXADO EM FALSE
-    use_lm = false  # use_lm_prob > 0.5
+    # Converte probabilidade use_lbfgs para booleano - FIXADO EM FALSE
+    use_lbfgs = false  # use_lbfgs_prob > 0.5
     
     # f_calls como valor contínuo
     f_calls = round(Int, params_vector[5])
@@ -499,7 +499,7 @@ function bayesian_objective(params_vector)
     elapsed = time() - BAYESIAN_START_TIME
     avg_time_per_config = elapsed > 0 ? elapsed / (BAYESIAN_COUNTER - 1) : 0
     
-    println("⚙️  [$BAYESIAN_COUNTER] Avaliando configuração: N=$(pso_params.N), C1=$(round(pso_params.C1,digits=2)), C2=$(round(pso_params.C2,digits=2)), ω=$(round(pso_params.ω,digits=2)), F=$(pso_params.f_calls_limit), LM=$(pso_params.use_lm), TW=$(round(pso_params.temporal_penalty_weight,digits=4)), MAD=$(round(pso_params.mad_threshold,digits=3)), LIQ=$(round(pso_params.fator_liq,digits=4))")
+    println("⚙️  [$BAYESIAN_COUNTER] Avaliando configuração: N=$(pso_params.N), C1=$(round(pso_params.C1,digits=2)), C2=$(round(pso_params.C2,digits=2)), ω=$(round(pso_params.ω,digits=2)), F=$(pso_params.f_calls_limit), L-BFGS=$(pso_params.use_lbfgs), TW=$(round(pso_params.temporal_penalty_weight,digits=4)), MAD=$(round(pso_params.mad_threshold,digits=3)), LIQ=$(round(pso_params.fator_liq,digits=4))")
     if BAYESIAN_COUNTER > 1
         println("   ⏱️  Tempo médio por configuração: $(round(avg_time_per_config, digits=1))s")
     end
@@ -580,7 +580,7 @@ function run_continuous_walkforward()
     println("   • C2 ∈ [$(get(hyperparams_config, "C2_min", 0.5)), $(get(hyperparams_config, "C2_max", 3.0))] (aceleração social)")
     println("   • ω ∈ [$(get(hyperparams_config, "omega_min", 0.1)), $(get(hyperparams_config, "omega_max", 0.9))] (peso de inércia)")
     println("   • f_calls ∈ [$(get(hyperparams_config, "f_calls_min", 600)), $(get(hyperparams_config, "f_calls_max", 2500))] (limite de avaliações)")
-    println("   • use_lm ∈ [$(get(hyperparams_config, "use_lm_prob_min", 0.0)), $(get(hyperparams_config, "use_lm_prob_max", 1.0))] (prob. refinamento LM)")
+    println("   • use_lbfgs ∈ [$(get(hyperparams_config, "use_lbfgs_prob_min", 0.0)), $(get(hyperparams_config, "use_lbfgs_prob_max", 1.0))] (prob. refinamento L-BFGS)")
     println("   • temporal_penalty ∈ [$(get(hyperparams_config, "temporal_penalty_min", 0.0001)), $(get(hyperparams_config, "temporal_penalty_max", 0.2))] (penalidade temporal)")
     println("   • mad_threshold ∈ [$(get(hyperparams_config, "mad_threshold_min", 6.0)), $(get(hyperparams_config, "mad_threshold_max", 12.0))] (limite MAD)")
     println("   • fator_liq ∈ [$(get(hyperparams_config, "fator_liq_min", 0.001)), $(get(hyperparams_config, "fator_liq_max", 0.015))] (fator liquidez)")
@@ -608,7 +608,7 @@ function run_continuous_walkforward()
         (get(hyperparams_config, "C2_min", 0.5), get(hyperparams_config, "C2_max", 3.0)),
         (get(hyperparams_config, "omega_min", 0.1), get(hyperparams_config, "omega_max", 0.9)),
         (get(hyperparams_config, "f_calls_min", 600.0), get(hyperparams_config, "f_calls_max", 2500.0)),
-        (get(hyperparams_config, "use_lm_prob_min", 0.0), get(hyperparams_config, "use_lm_prob_max", 1.0)),
+        (get(hyperparams_config, "use_lbfgs_prob_min", 0.0), get(hyperparams_config, "use_lbfgs_prob_max", 1.0)),
         (get(hyperparams_config, "temporal_penalty_min", 0.0001), get(hyperparams_config, "temporal_penalty_max", 0.2)),
         (get(hyperparams_config, "mad_threshold_min", 6.0), get(hyperparams_config, "mad_threshold_max", 12.0)),
         (get(hyperparams_config, "fator_liq_min", 0.001), get(hyperparams_config, "fator_liq_max", 0.015))
@@ -728,25 +728,25 @@ end
 
 
 function _print_comparison_table(pso_avg_test, pso_test_std, pso_avg_train, pso_overfitting, pso_avg_stability, pso_score, pso_blocks,
-                                 lm_avg_test, lm_test_std, lm_avg_train, lm_overfitting, lm_avg_stability, lm_score, lm_blocks)
+                                 lbfgs_avg_test, lbfgs_test_std, lbfgs_avg_train, lbfgs_overfitting, lbfgs_avg_stability, lbfgs_score, lbfgs_blocks)
     println("\n📊 RESULTADOS DA COMPARAÇÃO FINAL:")
     println("┌─────────────────────┬─────────────────┬─────────────────┐")
-    println("│ Métrica             │ PSO Puro        │ PSO+LM          │")
+    println("│ Métrica             │ PSO Puro        │ PSO+L-BFGS          │")
     println("├─────────────────────┼─────────────────┼─────────────────┤")
-    println("│ Custo Teste (norm.) │ $(rpad(round(pso_avg_test, digits=6), 15)) │ $(rpad(round(lm_avg_test, digits=6), 15)) │")
-    println("│ Desvio Teste        │ $(rpad(round(pso_test_std, digits=6), 15)) │ $(rpad(round(lm_test_std, digits=6), 15)) │")
-    println("│ Custo Treino (norm.)│ $(rpad(round(pso_avg_train, digits=6), 15)) │ $(rpad(round(lm_avg_train, digits=6), 15)) │")
-    println("│ Overfitting Ratio   │ $(rpad(round(pso_overfitting, digits=3), 15)) │ $(rpad(round(lm_overfitting, digits=3), 15)) │")
-    println("│ Estabilidade (bp)   │ $(rpad(round(pso_avg_stability, digits=1), 15)) │ $(rpad(round(lm_avg_stability, digits=1), 15)) │")
-    println("│ Score Híbrido       │ $(rpad(round(pso_score, digits=3), 15)) │ $(rpad(round(lm_score, digits=3), 15)) │")
-    println("│ Blocos Concluídos   │ $(rpad(pso_blocks, 15)) │ $(rpad(lm_blocks, 15)) │")
+    println("│ Custo Teste (norm.) │ $(rpad(round(pso_avg_test, digits=6), 15)) │ $(rpad(round(lbfgs_avg_test, digits=6), 15)) │")
+    println("│ Desvio Teste        │ $(rpad(round(pso_test_std, digits=6), 15)) │ $(rpad(round(lbfgs_test_std, digits=6), 15)) │")
+    println("│ Custo Treino (norm.)│ $(rpad(round(pso_avg_train, digits=6), 15)) │ $(rpad(round(lbfgs_avg_train, digits=6), 15)) │")
+    println("│ Overfitting Ratio   │ $(rpad(round(pso_overfitting, digits=3), 15)) │ $(rpad(round(lbfgs_overfitting, digits=3), 15)) │")
+    println("│ Estabilidade (bp)   │ $(rpad(round(pso_avg_stability, digits=1), 15)) │ $(rpad(round(lbfgs_avg_stability, digits=1), 15)) │")
+    println("│ Score Híbrido       │ $(rpad(round(pso_score, digits=3), 15)) │ $(rpad(round(lbfgs_score, digits=3), 15)) │")
+    println("│ Blocos Concluídos   │ $(rpad(pso_blocks, 15)) │ $(rpad(lbfgs_blocks, 15)) │")
     println("└─────────────────────┴─────────────────┴─────────────────┘")
 end
 
-# Comparação final PSO vs PSO+LM usando melhor configuração encontrada
+# Comparação final PSO vs PSO+L-BFGS usando melhor configuração encontrada
 function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::Dict)
     println("\n" * "=" ^ 80)
-    println("🥊 COMPARAÇÃO FINAL: PSO PURO vs PSO+LM")
+    println("🥊 COMPARAÇÃO FINAL: PSO PURO vs PSO+L-BFGS")
     println("=" ^ 80)
     println("🎯 Usando melhor configuração PSO encontrada na busca Bayesiana")
     println("⚙️  Config base: N=$(best_pso_params.N), C1=$(best_pso_params.C1), C2=$(best_pso_params.C2), ω=$(best_pso_params.ω)")
@@ -754,7 +754,7 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::
     
     blocks = get_continuous_blocks_from_config()
     
-    # Cria duas versões: PSO puro e PSO+LM
+    # Cria duas versões: PSO puro e PSO+L-BFGS
     pso_only_params = PSOHyperparams(
         best_pso_params.N,
         best_pso_params.C1, 
@@ -767,13 +767,13 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::
         best_pso_params.fator_liq
     )
     
-    pso_lm_params = PSOHyperparams(
+    pso_lbfgs_params = PSOHyperparams(
         best_pso_params.N,
         best_pso_params.C1,
         best_pso_params.C2, 
         best_pso_params.ω,
         best_pso_params.f_calls_limit,
-        true,  # PSO+LM
+        true,  # PSO+L-BFGS
         best_pso_params.temporal_penalty_weight,
         best_pso_params.mad_threshold,
         best_pso_params.fator_liq
@@ -782,19 +782,19 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::
     println("\n🚀 Executando validação cruzada para PSO PURO...")
     _, pso_results = continuous_walkforward_single_config(pso_only_params, blocks, cv_config)
     
-    println("\n🚀 Executando validação cruzada para PSO+LM...")
-    _, pso_lm_results = continuous_walkforward_single_config(pso_lm_params, blocks, cv_config)
+    println("\n🚀 Executando validação cruzada para PSO+L-BFGS...")
+    _, pso_lbfgs_results = continuous_walkforward_single_config(pso_lbfgs_params, blocks, cv_config)
     
     # Calcula métricas para ambos
     pso_test_costs = [r.normalized_test_cost for r in pso_results if r.normalized_test_cost > 0]
     pso_train_costs = [r.normalized_train_cost for r in pso_results if r.normalized_train_cost > 0]
     pso_stabilities = [r.vertex_stability for r in pso_results if r.vertex_stability > 0]
     
-    pso_lm_test_costs = [r.normalized_test_cost for r in pso_lm_results if r.normalized_test_cost > 0]
-    pso_lm_train_costs = [r.normalized_train_cost for r in pso_lm_results if r.normalized_train_cost > 0]
-    pso_lm_stabilities = [r.vertex_stability for r in pso_lm_results if r.vertex_stability > 0]
+    pso_lbfgs_test_costs = [r.normalized_test_cost for r in pso_lbfgs_results if r.normalized_test_cost > 0]
+    pso_lbfgs_train_costs = [r.normalized_train_cost for r in pso_lbfgs_results if r.normalized_train_cost > 0]
+    pso_lbfgs_stabilities = [r.vertex_stability for r in pso_lbfgs_results if r.vertex_stability > 0]
     
-    if isempty(pso_test_costs) || isempty(pso_lm_test_costs)
+    if isempty(pso_test_costs) || isempty(pso_lbfgs_test_costs)
         println("❌ Falha na comparação - dados insuficientes")
         return nothing, nothing
     end
@@ -806,12 +806,12 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::
     pso_avg_stability = mean(pso_stabilities)
     pso_overfitting = pso_avg_test / pso_avg_train
     
-    # Métricas PSO+LM
-    lm_avg_test = mean(pso_lm_test_costs)
-    lm_test_std = length(pso_lm_test_costs) > 1 ? std(pso_lm_test_costs) : 0.0
-    lm_avg_train = mean(pso_lm_train_costs)
-    lm_avg_stability = mean(pso_lm_stabilities)
-    lm_overfitting = lm_avg_test / lm_avg_train
+    # Métricas PSO+L-BFGS
+    lbfgs_avg_test = mean(pso_lbfgs_test_costs)
+    lbfgs_test_std = length(pso_lbfgs_test_costs) > 1 ? std(pso_lbfgs_test_costs) : 0.0
+    lbfgs_avg_train = mean(pso_lbfgs_train_costs)
+    lbfgs_avg_stability = mean(pso_lbfgs_stabilities)
+    lbfgs_overfitting = lbfgs_avg_test / lbfgs_avg_train
     
     # Score híbrido simplificado para comparação direta
     scaling_config = get(cv_config, "bayesian_objective_scaling", Dict())
@@ -819,25 +819,25 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::
     overfitting_penalty_mult = get(scaling_config, "overfitting_penalty", 2.0)
 
     pso_score = pso_avg_test + (pso_avg_stability / stability_scale) + max(0, pso_overfitting - 1.0) * overfitting_penalty_mult
-    lm_score = lm_avg_test + (lm_avg_stability / stability_scale) + max(0, lm_overfitting - 1.0) * overfitting_penalty_mult
+    lbfgs_score = lbfgs_avg_test + (lbfgs_avg_stability / stability_scale) + max(0, lbfgs_overfitting - 1.0) * overfitting_penalty_mult
     
     _print_comparison_table(pso_avg_test, pso_test_std, pso_avg_train, pso_overfitting, pso_avg_stability, pso_score, length(pso_test_costs),
-                            lm_avg_test, lm_test_std, lm_avg_train, lm_overfitting, lm_avg_stability, lm_score, length(pso_lm_test_costs))
+                            lbfgs_avg_test, lbfgs_test_std, lbfgs_avg_train, lbfgs_overfitting, lbfgs_avg_stability, lbfgs_score, length(pso_lbfgs_test_costs))
     
     # Decisão final
-    pso_wins_test = pso_avg_test < lm_avg_test
-    pso_wins_overfitting = pso_overfitting < lm_overfitting  
-    pso_wins_stability = pso_avg_stability < lm_avg_stability  # Menor = melhor
-    pso_wins_hybrid = pso_score < lm_score  # Menor = melhor
+    pso_wins_test = pso_avg_test < lbfgs_avg_test
+    pso_wins_overfitting = pso_overfitting < lbfgs_overfitting  
+    pso_wins_stability = pso_avg_stability < lbfgs_avg_stability  # Menor = melhor
+    pso_wins_hybrid = pso_score < lbfgs_score  # Menor = melhor
     
     println("\n🏆 ANÁLISE COMPARATIVA:")
-    println("  Custo de Teste: $(pso_wins_test ? "✅ PSO" : "✅ PSO+LM") $(pso_wins_test ? "menor" : "menor") ($(abs(round(((pso_avg_test - lm_avg_test) / max(pso_avg_test, lm_avg_test)) * 100, digits=2)))% diferença)")
-    println("  Overfitting: $(pso_wins_overfitting ? "✅ PSO" : "✅ PSO+LM") melhor ($(round(min(pso_overfitting, lm_overfitting), digits=3)) vs $(round(max(pso_overfitting, lm_overfitting), digits=3)))")
-    println("  Estabilidade: $(pso_wins_stability ? "✅ PSO" : "✅ PSO+LM") mais estável ($(round(min(pso_avg_stability, lm_avg_stability), digits=1)) vs $(round(max(pso_avg_stability, lm_avg_stability), digits=1)) bp/dia)")
+    println("  Custo de Teste: $(pso_wins_test ? "✅ PSO" : "✅ PSO+L-BFGS") $(pso_wins_test ? "menor" : "menor") ($(abs(round(((pso_avg_test - lbfgs_avg_test) / max(pso_avg_test, lbfgs_avg_test)) * 100, digits=2)))% diferença)")
+    println("  Overfitting: $(pso_wins_overfitting ? "✅ PSO" : "✅ PSO+L-BFGS") melhor ($(round(min(pso_overfitting, lbfgs_overfitting), digits=3)) vs $(round(max(pso_overfitting, lbfgs_overfitting), digits=3)))")
+    println("  Estabilidade: $(pso_wins_stability ? "✅ PSO" : "✅ PSO+L-BFGS") mais estável ($(round(min(pso_avg_stability, lbfgs_avg_stability), digits=1)) vs $(round(max(pso_avg_stability, lbfgs_avg_stability), digits=1)) bp/dia)")
     
     println("\n🎯 DECISÃO FINAL:")
     if pso_wins_hybrid
-        improvement_pct = ((lm_score - pso_score) / lm_score) * 100
+        improvement_pct = ((lbfgs_score - pso_score) / lbfgs_score) * 100
         println("  🏅 VENCEDOR: PSO PURO")
         println("  📈 PSO puro é $(round(improvement_pct, digits=1))% melhor no score híbrido")
         println("  💡 RECOMENDAÇÃO: Use PSO puro - mais simples e eficiente")
@@ -849,22 +849,22 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::
             avg_vertex_stability = pso_avg_stability,
             test_cost_std = pso_test_std,
             blocks_completed = length(pso_test_costs),
-            hybrid_score_normalized = 1.0 - (pso_score / (pso_score + lm_score))  # Normalizado entre 0-1
+            hybrid_score_normalized = 1.0 - (pso_score / (pso_score + lbfgs_score))  # Normalizado entre 0-1
         )
     else
-        improvement_pct = ((pso_score - lm_score) / pso_score) * 100
-        println("  🏅 VENCEDOR: PSO+LM")
-        println("  📈 PSO+LM é $(round(improvement_pct, digits=1))% melhor no score híbrido")
-        println("  💡 RECOMENDAÇÃO: Use PSO+LM - refinamento melhora performance")
-        winner_params = pso_lm_params
+        improvement_pct = ((pso_score - lbfgs_score) / pso_score) * 100
+        println("  🏅 VENCEDOR: PSO+L-BFGS")
+        println("  📈 PSO+L-BFGS é $(round(improvement_pct, digits=1))% melhor no score híbrido")
+        println("  💡 RECOMENDAÇÃO: Use PSO+L-BFGS - refinamento melhora performance")
+        winner_params = pso_lbfgs_params
         winner_result = (
-            avg_test_cost_normalized = lm_avg_test,
-            avg_train_cost_normalized = lm_avg_train,
-            overfitting_ratio = lm_overfitting,
-            avg_vertex_stability = lm_avg_stability,
-            test_cost_std = lm_test_std,
-            blocks_completed = length(pso_lm_test_costs),
-            hybrid_score_normalized = 1.0 - (lm_score / (pso_score + lm_score))  # Normalizado entre 0-1
+            avg_test_cost_normalized = lbfgs_avg_test,
+            avg_train_cost_normalized = lbfgs_avg_train,
+            overfitting_ratio = lbfgs_overfitting,
+            avg_vertex_stability = lbfgs_avg_stability,
+            test_cost_std = lbfgs_test_std,
+            blocks_completed = length(pso_lbfgs_test_costs),
+            hybrid_score_normalized = 1.0 - (lbfgs_score / (pso_score + lbfgs_score))  # Normalizado entre 0-1
         )
     end
     
@@ -874,10 +874,10 @@ end
 function _print_bayesian_ranking_table(sorted_results)
     println("\n📊 RANKING OTIMIZAÇÃO BAYESIANA POR SCORE HÍBRIDO NORMALIZADO (média across regimes):")
     for (rank, (params, result)) in enumerate(sorted_results)
-        lm_icon = params.use_lm ? "✅" : "❌"
+        lbfgs_icon = params.use_lbfgs ? "✅" : "❌"
         hybrid_score = result.hybrid_score_normalized
 
-        println("  $rank. N=$(params.N), C1=$(round(params.C1,digits=2)), C2=$(round(params.C2,digits=2)), ω=$(round(params.ω,digits=2)), LM=$lm_icon, TW=$(round(params.temporal_penalty_weight,digits=4)), MAD=$(round(params.mad_threshold,digits=3)), LIQ=$(round(params.fator_liq,digits=4))")
+        println("  $rank. N=$(params.N), C1=$(round(params.C1,digits=2)), C2=$(round(params.C2,digits=2)), ω=$(round(params.ω,digits=2)), L-BFGS=$lbfgs_icon, TW=$(round(params.temporal_penalty_weight,digits=4)), MAD=$(round(params.mad_threshold,digits=3)), LIQ=$(round(params.fator_liq,digits=4))")
         println("     🏆 Score HÍBRIDO: $(round(hybrid_score, digits=3)) (quanto MAIOR melhor - 0-1)")
         println("     🎯 Teste normalizado: $(round(result.avg_test_cost_normalized, digits=6)) ± $(round(result.test_cost_std, digits=6))")
         println("     🌊 Estabilidade: $(round(result.avg_vertex_stability, digits=1)) ± $(round(result.stability_std, digits=1)) bp/dia")
@@ -907,15 +907,15 @@ function analyze_continuous_results(results, _)
     
     _print_bayesian_ranking_table(sorted_results)
     
-    # Análise PSO vs PSO+LM
-    pso_only = [(p, r) for (p, r) in sorted_results if !p.use_lm]
-    pso_lm = [(p, r) for (p, r) in sorted_results if p.use_lm]
+    # Análise PSO vs PSO+L-BFGS
+    pso_only = [(p, r) for (p, r) in sorted_results if !p.use_lbfgs]
+    pso_lbfgs = [(p, r) for (p, r) in sorted_results if p.use_lbfgs]
     
-    if !isempty(pso_only) && !isempty(pso_lm)
-        println("📈 COMPARAÇÃO PSO vs PSO+LM (OUT-OF-SAMPLE):")
+    if !isempty(pso_only) && !isempty(pso_lbfgs)
+        println("📈 COMPARAÇÃO PSO vs PSO+L-BFGS (OUT-OF-SAMPLE):")
         
         best_pso = pso_only[1]
-        best_lm = pso_lm[1]
+        best_lbfgs = pso_lbfgs[1]
         
         println("  🥇 Melhor PSO puro:")
         println("     Config: N=$(best_pso[1].N), C1=$(best_pso[1].C1), TW=$(best_pso[1].temporal_penalty_weight), MAD=$(best_pso[1].mad_threshold), LIQ=$(best_pso[1].fator_liq)")
@@ -923,57 +923,57 @@ function analyze_continuous_results(results, _)
         println("     Overfitting: $(round(best_pso[2].overfitting_ratio, digits=2))")
         println("     Estabilidade: $(round(best_pso[2].avg_vertex_stability, digits=1)) bp/dia")
         
-        println("  🥇 Melhor PSO+LM:")
-        println("     Config: N=$(best_lm[1].N), C1=$(best_lm[1].C1), TW=$(best_lm[1].temporal_penalty_weight), MAD=$(best_lm[1].mad_threshold), LIQ=$(best_lm[1].fator_liq)")
-        println("     Teste normalizado: $(round(best_lm[2].avg_test_cost_normalized, digits=6))")
-        println("     Overfitting: $(round(best_lm[2].overfitting_ratio, digits=2))")
-        println("     Estabilidade: $(round(best_lm[2].avg_vertex_stability, digits=1)) bp/dia")
+        println("  🥇 Melhor PSO+L-BFGS:")
+        println("     Config: N=$(best_lbfgs[1].N), C1=$(best_lbfgs[1].C1), TW=$(best_lbfgs[1].temporal_penalty_weight), MAD=$(best_lbfgs[1].mad_threshold), LIQ=$(best_lbfgs[1].fator_liq)")
+        println("     Teste normalizado: $(round(best_lbfgs[2].avg_test_cost_normalized, digits=6))")
+        println("     Overfitting: $(round(best_lbfgs[2].overfitting_ratio, digits=2))")
+        println("     Estabilidade: $(round(best_lbfgs[2].avg_vertex_stability, digits=1)) bp/dia")
         
         # Comparações quantitativas normalizadas
-        improvement = ((best_pso[2].avg_test_cost_normalized - best_lm[2].avg_test_cost_normalized) / best_pso[2].avg_test_cost_normalized) * 100
+        improvement = ((best_pso[2].avg_test_cost_normalized - best_lbfgs[2].avg_test_cost_normalized) / best_pso[2].avg_test_cost_normalized) * 100
         
         println("\n🎯 CONCLUSÃO DEFINITIVA (SCORE HÍBRIDO NORMALIZADO):")
         
         # Usa o score híbrido normalizado por range completo para a decisão final
         best_pso_hybrid = best_pso[2].hybrid_score_normalized
-        best_lm_hybrid = best_lm[2].hybrid_score_normalized
+        best_lbfgs_hybrid = best_lbfgs[2].hybrid_score_normalized
         
         println("  📊 Performance HÍBRIDA across regimes (usando score normalizado min-max):")
         
-        if best_lm_hybrid > best_pso_hybrid
+        if best_lbfgs_hybrid > best_pso_hybrid
             # Usar abs() para evitar divisão por zero se o score for 0
-            improvement = ((best_lm_hybrid - best_pso_hybrid) / abs(best_pso_hybrid)) * 100
-            println("  ✅ PSO+LM é $(round(improvement, digits=2))% superior no score híbrido")
-            println("  ✅ RECOMENDAÇÃO: Usar sistema híbrido PSO+LM")
-            println("  🎯 Melhor overfitting: $(round(best_lm[2].overfitting_ratio, digits=3)) vs $(round(best_pso[2].overfitting_ratio, digits=3))")
+            improvement = ((best_lbfgs_hybrid - best_pso_hybrid) / abs(best_pso_hybrid)) * 100
+            println("  ✅ PSO+L-BFGS é $(round(improvement, digits=2))% superior no score híbrido")
+            println("  ✅ RECOMENDAÇÃO: Usar sistema híbrido PSO+L-BFGS")
+            println("  🎯 Melhor overfitting: $(round(best_lbfgs[2].overfitting_ratio, digits=3)) vs $(round(best_pso[2].overfitting_ratio, digits=3))")
         else
-            improvement = ((best_pso_hybrid - best_lm_hybrid) / abs(best_lm_hybrid)) * 100
+            improvement = ((best_pso_hybrid - best_lbfgs_hybrid) / abs(best_lbfgs_hybrid)) * 100
             println("  ⚪ PSO puro é $(round(improvement, digits=2))% superior no score híbrido")
             println("  ⚪ RECOMENDAÇÃO: PSO puro é suficiente")
-            println("  🎯 Melhor overfitting: $(round(best_pso[2].overfitting_ratio, digits=3)) vs $(round(best_lm[2].overfitting_ratio, digits=3))")
+            println("  🎯 Melhor overfitting: $(round(best_pso[2].overfitting_ratio, digits=3)) vs $(round(best_lbfgs[2].overfitting_ratio, digits=3))")
         end
         
         # Análise de estabilidade
         pso_stability = [r[2].avg_vertex_stability for r in pso_only]
-        lm_stability = [r[2].avg_vertex_stability for r in pso_lm]
+        lm_stability = [r[2].avg_vertex_stability for r in pso_lbfgs]
         
         println("\n🌊 ANÁLISE DE ESTABILIDADE DOS VÉRTICES (6 vértices: 0.5, 1, 3, 5, 10, 15 anos):")
         println("  PSO puro - Média: $(round(mean(pso_stability), digits=1)) bp/dia")
-        println("  PSO+LM - Média: $(round(mean(lm_stability), digits=1)) bp/dia")
+        println("  PSO+L-BFGS - Média: $(round(mean(lm_stability), digits=1)) bp/dia")
         
         if mean(lm_stability) < mean(pso_stability)
-            println("  ✅ PSO+LM produz curvas mais estáveis")
+            println("  ✅ PSO+L-BFGS produz curvas mais estáveis")
         else
             println("  ⚠️  PSO puro produz curvas mais estáveis")
         end
         
         # Análise de overfitting
         pso_overfit = [r[2].overfitting_ratio for r in pso_only]
-        lm_overfit = [r[2].overfitting_ratio for r in pso_lm]
+        lm_overfit = [r[2].overfitting_ratio for r in pso_lbfgs]
         
         println("\n📊 ANÁLISE DE OVERFITTING:")
         println("  PSO puro - Overfitting médio: $(round(mean(pso_overfit), digits=2))")
-        println("  PSO+LM - Overfitting médio: $(round(mean(lm_overfit), digits=2))")
+        println("  PSO+L-BFGS - Overfitting médio: $(round(mean(lm_overfit), digits=2))")
     end
 end
 
@@ -985,7 +985,7 @@ function main()
 
     analyze_continuous_results(results, cv_config)
     
-    # Executa comparação final PSO vs PSO+LM usando melhor configuração
+    # Executa comparação final PSO vs PSO+L-BFGS usando melhor configuração
     final_winner_params = nothing
     final_winner_result = nothing
     
@@ -995,7 +995,7 @@ function main()
         best_pso_params = sorted_results[1][1]
         best_pso_result = sorted_results[1][2]
         
-        println("\n🎯 EXECUTANDO COMPARAÇÃO FINAL PSO vs PSO+LM...")
+        println("\n🎯 EXECUTANDO COMPARAÇÃO FINAL PSO vs PSO+L-BFGS...")
         println("Usando melhor configuração PSO encontrada: N=$(best_pso_params.N), C1=$(best_pso_params.C1), etc.")
         
         final_winner_params, final_winner_result = final_pso_vs_lm_comparison(best_pso_params, cv_config)
@@ -1025,7 +1025,7 @@ function main()
                 "f_calls_limit" => best_params.f_calls_limit
             ),
             "optimization" => Dict{String, Any}(
-                "use_lm" => best_params.use_lm,
+                "use_lm" => best_params.use_lbfgs,
                 "temporal_penalty_weight" => best_params.temporal_penalty_weight
             ),
             "outlier_detection" => Dict{String, Any}(
@@ -1043,8 +1043,8 @@ function main()
             "blocks_completed" => best_result.blocks_completed,
             "regimes_tested" => 6,  # Total regimes tested
             "execution_time_minutes" => round(elapsed_time/60, digits=1),
-            "methodology" => best_params.use_lm ? "PSO_plus_LM_final_comparison_winner" : "PSO_only_final_comparison_winner",
-            "cv_method" => "cross_regime_walk_forward_30days_with_final_pso_vs_lm_comparison",
+            "methodology" => best_params.use_lbfgs ? "PSO_plus_LBFGS_final_comparison_winner" : "PSO_only_final_comparison_winner",
+            "cv_method" => "cross_regime_walk_forward_30days_with_final_pso_vs_lbfgs_comparison",
             "period" => "2014-2024_all_regimes",
             "selection_method" => "bayesian_optimization_plus_final_head_to_head_comparison"
         )
@@ -1055,7 +1055,7 @@ function main()
             "performance_metrics" => performance_metrics,
             "metadata" => Dict{String, Any}(
                 "generated_at" => string(now()),
-                "methodology" => "PSO_plus_LM_hybrid_bayesian_optimization",
+                "methodology" => "PSO_plus_LBFGS_hybrid_bayesian_optimization",
                 "cv_method" => "cross_regime_walk_forward_30days"
             )
         )

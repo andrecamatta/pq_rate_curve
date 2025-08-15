@@ -298,7 +298,7 @@ Returns:
 - final_cost: Final cost value
 - success: Whether optimization converged successfully
 """
-function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
+function refine_nss_with_lbfgs(cash_flows, ref_date, pso_params, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
                                              max_iterations=100,
                                              show_trace=false,
                                              previous_params=nothing,
@@ -306,7 +306,7 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, l
                                              verbose::Bool=true)
 
     if verbose
-        println("🔧 Aplicando refinamento com Otimizador de Box (L-BFGS) via Optim.jl...")
+        println("🔧 Aplicando refinamento com L-BFGS via Optim.jl...")
     end
     
     selic_rate = get_selic_rate(ref_date; verbose=verbose)
@@ -322,8 +322,8 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, l
     objective(params) = calculate_nss_cost(params, cash_flows_with_times, selic_rate, previous_params, temporal_penalty_weight)
 
     try
-        # Expand bounds slightly to avoid boundary warnings in LM
-        # PSO parameters might be exactly on the boundary, but LM needs interior positions
+        # Expand bounds slightly to avoid boundary warnings in L-BFGS
+        # PSO parameters might be exactly on the boundary, but L-BFGS needs interior positions
         bound_expansion = 0.001  # Small expansion factor
         range_sizes = upper_bounds .- lower_bounds
         expanded_lower = lower_bounds .- bound_expansion .* range_sizes
@@ -334,19 +334,19 @@ function refine_nss_with_levenberg_marquardt(cash_flows, ref_date, pso_params, l
                                 Fminbox(LBFGS()),
                                 Optim.Options(iterations = max_iterations, show_trace = show_trace))
         
-        params_lm = Optim.minimizer(result)
-        cost_lm = Optim.minimum(result)
+        params_lbfgs = Optim.minimizer(result)
+        cost_lbfgs = Optim.minimum(result)
         converged = Optim.converged(result)
 
         if verbose
-            println("   Convergiu com Optim.jl: $(converged ? "✅" : "❌")")
-            println("   Custo LM (unificado): $(round(cost_lm, digits=6))")
+            println("   Convergiu com L-BFGS: $(converged ? "✅" : "❌")")
+            println("   Custo L-BFGS (unificado): $(round(cost_lbfgs, digits=6))")
         end
         
-        return params_lm, cost_lm, converged
+        return params_lbfgs, cost_lbfgs, converged
         
     catch e
-        @warn "Optim.jl (L-BFGS) optimization failed: $e. Retornando parâmetros PSO."
+        @warn "L-BFGS optimization failed: $e. Retornando parâmetros PSO."
         
         # Fallback to calculate original PSO cost for comparison
         pso_cost = objective(pso_params)

@@ -3,12 +3,12 @@ PQRateCurve.jl - Brazilian Government Bond Yield Curve Fitting Module
 
 This module provides functionality for fitting Nelson-Siegel-Svensson yield curves
 to Brazilian government bond data using Particle Swarm Optimization and 
-Levenberg-Marquardt refinement.
+L-BFGS refinement.
 
 Main features:
 - Nelson-Siegel-Svensson yield curve estimation
 - Outlier detection using MAD and liquidity criteria  
-- PSO+LM hybrid optimization
+- PSO+L-BFGS hybrid optimization
 - Walk-forward cross-validation
 - Temporal continuity constraints
 """
@@ -31,7 +31,7 @@ export
     
     # Optimization and estimation
     optimize_nelson_siegel_svensson_with_mad_outlier_removal,
-    refine_nss_with_levenberg_marquardt, calculate_pricing_error_duration_only,
+    refine_nss_with_lbfgs, calculate_pricing_error_duration_only,
     calculate_out_of_sample_cost_reais, precompute_cash_flow_times,
     
     # Walk-forward validation

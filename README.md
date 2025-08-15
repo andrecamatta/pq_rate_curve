@@ -1,6 +1,6 @@
 # PQ Rate Curve
 
-Sistema de ajuste de curvas de juros Nelson-Siegel-Svensson (NSS) para títulos públicos brasileiros usando otimização PSO (Particle Swarm Optimization) com refinamento Levenberg-Marquardt.
+Sistema de ajuste de curvas de juros Nelson-Siegel-Svensson (NSS) para títulos públicos brasileiros usando otimização PSO (Particle Swarm Optimization) com refinamento L-BFGS.
 
 ## Objetivos
 
@@ -8,7 +8,7 @@ Este projeto implementa um sistema robusto para:
 
 1. **Estimação de curvas de juros** usando o modelo Nelson-Siegel-Svensson
 2. **Remoção automática de outliers** baseada em MAD (Median Absolute Deviation) e critérios de liquidez
-3. **Otimização híbrida** PSO + Levenberg-Marquardt para ajuste de parâmetros
+3. **Otimização híbrida** PSO + L-BFGS para ajuste de parâmetros
 4. **Validação cruzada walk-forward** com continuidade temporal
 5. **Análise de performance** através de múltiplos regimes econômicos
 
@@ -22,7 +22,7 @@ O sistema processa dados do BACEN (Banco Central do Brasil) e do Tesouro Direto 
 │   ├── financial_math.jl        # Funções matemáticas financeiras
 │   ├── data_handling.jl         # Manipulação de dados BACEN
 │   ├── outlier_detection.jl     # Detecção de outliers MAD + liquidez
-│   └── estimation.jl            # Otimização PSO + LM
+│   └── estimation.jl            # Otimização PSO + L-BFGS
 ├── config.toml                  # Configuração padrão
 ├── optimal_config.toml          # Configuração otimizada (gerada)
 ├── fit_curvas.jl               # Script para ajuste de curvas
@@ -43,7 +43,7 @@ julia run_continuous_walkforward_cv.jl
 
 **O que faz:**
 - Executa otimização bayesiana sobre 6 regimes econômicos diferentes (2015-2024)
-- Testa configurações PSO vs PSO+LM através de 20 configurações
+- Testa configurações PSO vs PSO+L-BFGS através de 20 configurações
 - Avalia performance usando blocos de 30 dias (treino → teste)
 - Gera arquivo `optimal_config.toml` com a melhor configuração
 
@@ -60,7 +60,7 @@ omega = 0.45              # Peso de inércia
 f_calls_limit = 1500      # Limite de avaliações
 
 [optimization]
-use_lm = true             # Usar refinamento Levenberg-Marquardt
+use_lbfgs = true          # Usar refinamento L-BFGS
 temporal_penalty_weight = 0.01  # Penalidade de continuidade temporal
 
 [outlier_detection]
@@ -103,7 +103,7 @@ julia fit_curvas.jl --start 2024-01-01 --end 2024-01-31 --dry-run
 **O que faz:**
 - Carrega dados BACEN para cada data útil no período
 - Aplica detecção de outliers (MAD + liquidez)
-- Otimiza parâmetros NSS usando PSO + LM (se configurado)
+- Otimiza parâmetros NSS usando PSO + L-BFGS (se configurado)
 - Mantém continuidade temporal usando parâmetros do dia anterior
 - Gera arquivo CSV com resultados: `curvas_nss_YYYY-MM-DD_HH-MM-SS.csv`
 
@@ -149,7 +149,7 @@ r(τ) = β₀ + β₁[(1-e^(-τ/τ₁))/(τ/τ₁)] + β₂[((1-e^(-τ/τ₁))/(
 ### Otimização Híbrida
 
 1. **PSO (Particle Swarm Optimization)**: Exploração global do espaço de parâmetros
-2. **Levenberg-Marquardt**: Refinamento local para convergência precisa
+2. **L-BFGS**: Refinamento local para convergência precisa
 3. **Continuidade temporal**: Penalidade para mudanças bruscas entre dias consecutivos
 
 ### Detecção de Outliers

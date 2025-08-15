@@ -73,7 +73,7 @@ function normalize_config_format(config)
     # Extrai parâmetros de otimização
     if haskey(actual_config, "optimization")
         opt = actual_config["optimization"]
-        normalized["use_lm"] = opt["use_lm"]
+        normalized["use_lbfgs"] = opt["use_lbfgs"]
         normalized["temporal_penalty_weight"] = opt["temporal_penalty_weight"]
     else
         error("Missing required configuration section: optimization")
@@ -92,7 +92,7 @@ function normalize_config_format(config)
     fit_curves_config = get(actual_config, "fit_curves", Dict())
     normalized["continuity_search_days"] = get(fit_curves_config, "continuity_search_days", 30)
     normalized["min_bonds_for_fit"] = get(fit_curves_config, "min_bonds_for_fit", 3)
-    normalized["lm_max_iterations"] = get(fit_curves_config, "lm_max_iterations", 50)
+    normalized["lbfgs_max_iterations"] = get(fit_curves_config, "lbfgs_max_iterations", 50)
     normalized["reoptimization_cost_multiplier"] = get(fit_curves_config, "reoptimization_cost_multiplier", 10.0)
     normalized["reoptimization_pso_multiplier"] = get(fit_curves_config, "reoptimization_pso_multiplier", 2.0)
     
@@ -190,25 +190,25 @@ function fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_para
             bond_quantities=bond_quantities
         )
         
-        # Refinamento LM se configurado
-        if config["use_lm"]
+        # Refinamento L-BFGS se configurado
+        if config["use_lbfgs"]
             try
-                params_lm, cost_lm, lm_success = refine_nss_with_levenberg_marquardt(
+                params_lbfgs, cost_lbfgs, lbfgs_success = refine_nss_with_lbfgs(
                     final_cash_flows, date, params, config["lower_bounds"], config["upper_bounds"];
-                    max_iterations=config["lm_max_iterations"], show_trace=false,
+                    max_iterations=config["lbfgs_max_iterations"], show_trace=false,
                     previous_params=previous_params,
                     temporal_penalty_weight=config["temporal_penalty_weight"]
                 )
                 
-                if lm_success && cost_lm < cost
-                    params = params_lm
-                    cost = cost_lm
+                if lbfgs_success && cost_lbfgs < cost
+                    params = params_lbfgs
+                    cost = cost_lbfgs
                     if verbose
-                        print(" + LM")
+                        print(" + L-BFGS")
                     end
                 end
             catch
-                # Mantém PSO se LM falhar
+                # Mantém PSO se L-BFGS falhar
             end
         end
         
@@ -263,21 +263,21 @@ function _reoptimize_if_needed(cost, previous_cost, config, cash_flows, date, pa
         bond_quantities=bond_quantities
     )
 
-    if config["use_lm"]
+    if config["use_lbfgs"]
         try
-            params_lm_reopt, cost_lm_reopt, lm_success_reopt = refine_nss_with_levenberg_marquardt(
+            params_lbfgs_reopt, cost_lbfgs_reopt, lbfgs_success_reopt = refine_nss_with_lbfgs(
                 final_cash_flows_reopt, date, params_reopt, config["lower_bounds"], config["upper_bounds"];
-                max_iterations=config["lm_max_iterations"], show_trace=false,
+                max_iterations=config["lbfgs_max_iterations"], show_trace=false,
                 previous_params=previous_params,
                 temporal_penalty_weight=config["temporal_penalty_weight"]
             )
-            if lm_success_reopt && cost_lm_reopt < cost_reopt
-                params_reopt = params_lm_reopt
-                cost_reopt = cost_lm_reopt
-                if verbose; print(" + LM-reopt"); end
+            if lbfgs_success_reopt && cost_lbfgs_reopt < cost_reopt
+                params_reopt = params_lbfgs_reopt
+                cost_reopt = cost_lbfgs_reopt
+                if verbose; print(" + L-BFGS-reopt"); end
             end
         catch
-            # Mantém PSO re-otimizado se LM falhar
+            # Mantém PSO re-otimizado se L-BFGS falhar
         end
     end
 
@@ -307,7 +307,7 @@ function fit_curves_sequential(start_date::Date, end_date::Date;
     if verbose
         println("✅ Configuração ótima:")
         println("   N=$(config["N"]), C1=$(config["C1"]), C2=$(config["C2"])")
-        println("   ω=$(config["omega"]), LM=$(config["use_lm"])")
+        println("   ω=$(config["omega"]), L-BFGS=$(config["use_lbfgs"])")
         println("   Temporal penalty=$(config["temporal_penalty_weight"])")
         println("   MAD threshold=$(config["mad_threshold"])")
         println("   Fator liquidez=$(config["fator_liq"]) ($(config["fator_liq"]*100)% do total)")
