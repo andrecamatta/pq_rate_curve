@@ -189,6 +189,164 @@ end
 
 **Veja exemplo completo em:** [`examples/high_level_usage.jl`](examples/high_level_usage.jl)
 
+## Persistência SQLite (Banco de Dados Histórico)
+
+O módulo oferece sistema de persistência SQLite para armazenar parâmetros NSS históricos, permitindo:
+- **Processamento incremental**: Processa apenas datas faltantes
+- **Retomada automática**: Interrupções são retomadas automaticamente
+- **Consultas eficientes**: SQLite permite análises SQL diretas
+- **Backup compacto**: Banco de dados único (~1 MB/ano)
+
+### Modo Banco de Dados com `fit_curves_for_period`
+
+```julia
+using PQRateCurve, Dates
+
+# Primeira execução: processa todas as datas e salva no banco
+results, config = fit_curves_for_period(
+    Date(2015, 1, 1),
+    Date(2025, 12, 31);
+    db_path="curves.db",       # Ativa persistência SQLite
+    output_csv=nothing,         # Opcional: CSV não necessário
+    find_continuity=true,
+    verbose=true
+)
+
+# Segunda execução: apenas processa datas novas!
+# (Datas já existentes são carregadas do banco)
+results, config = fit_curves_for_period(
+    Date(2015, 1, 1),
+    Date(2026, 3, 31);  # Estendeu período
+    db_path="curves.db",
+    verbose=true
+)
+```
+
+### Funções de Persistência
+
+#### Gerenciamento do Banco
+
+```julia
+# Inicializar/abrir banco
+db = init_database("curves.db")
+
+# Estatísticas gerais
+stats = get_database_stats(db)
+println("Total de curvas: $(stats.total_curves)")
+println("Taxa de sucesso: $(stats.success_rate)%")
+println("Período: $(stats.date_range[1]) → $(stats.date_range[2])")
+```
+
+#### Salvar Curvas
+
+```julia
+# Salvar curva bem-sucedida
+save_curve(db, Date(2024, 1, 2), params, cost, n_bonds, outliers_removed;
+          success=true, used_previous_params=false)
+
+# Salvar falha
+save_curve_failure(db, Date(2024, 1, 3), "Dados insuficientes")
+```
+
+#### Consultar Dados
+
+```julia
+# Carregar intervalo de curvas
+curves = load_curves(db, Date(2024, 1, 1), Date(2024, 12, 31))
+
+# Carregar curva específica
+curve = load_curve(db, Date(2024, 6, 15))
+if curve !== nothing && curve.success
+    println("β₀ = $(curve.params[1])")
+    println("Custo = $(curve.cost)")
+end
+
+# Verificar se curva existe
+if curve_exists(db, Date(2024, 1, 2))
+    println("Curva já processada!")
+end
+
+# Obter datas faltantes
+missing = get_missing_dates(db, Date(2024, 1, 1), Date(2024, 12, 31))
+println("Faltam processar: $(length(missing)) dias")
+```
+
+### Exemplo: Construir Base Histórica Completa
+
+```julia
+using PQRateCurve, Dates
+
+# Processar todo o período viável (2015-2025)
+# Sistema automaticamente:
+# - Cria banco se não existir
+# - Carrega datas já processadas
+# - Processa apenas datas faltantes
+# - Salva cada resultado automaticamente
+
+results, config = fit_curves_for_period(
+    Date(2015, 2, 1),   # Primeira data viável (90% sucesso)
+    Date(2025, 9, 30);  # Última data com dados
+    db_path="historical_curves.db",
+    find_continuity=true,
+    verbose=true
+)
+
+# Pode interromper a qualquer momento (Ctrl+C)
+# Ao rodar novamente, continua de onde parou!
+
+# Analisar dados do banco
+db = init_database("historical_curves.db")
+stats = get_database_stats(db)
+println("Base histórica: $(stats.total_curves) curvas ($(stats.success_rate)% sucesso)")
+
+# Exportar para CSV se necessário
+all_curves = load_curves(db, Date(2015, 1, 1), Date(2025, 12, 31))
+CSV.write("curvas_historicas.csv", all_curves)
+```
+
+### Schema do Banco de Dados
+
+O banco SQLite contém a tabela `nss_curves`:
+
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `date` | TEXT (PK) | Data de referência (yyyy-mm-dd) |
+| `beta0, beta1, beta2, beta3` | REAL | Parâmetros β do modelo NSS |
+| `tau1, tau2` | REAL | Parâmetros τ do modelo NSS |
+| `cost` | REAL | Custo de ajuste (erro médio em R$) |
+| `n_bonds` | INTEGER | Número de títulos usados |
+| `outliers_removed` | INTEGER | Outliers removidos |
+| `success` | INTEGER | 1=sucesso, 0=falha |
+| `error_message` | TEXT | Mensagem de erro (se falhou) |
+| `used_previous_params` | INTEGER | Usou parâmetros anteriores |
+| `reoptimized` | INTEGER | Foi reotimizado |
+| `created_at` | TEXT | Timestamp criação |
+| `updated_at` | TEXT | Timestamp atualização |
+
+### Consultas SQL Diretas
+
+Você pode usar qualquer ferramenta SQLite para consultas customizadas:
+
+```sql
+-- Top 10 piores ajustes
+SELECT date, cost, n_bonds FROM nss_curves
+WHERE success = 1 ORDER BY cost DESC LIMIT 10;
+
+-- Taxa de sucesso por ano
+SELECT strftime('%Y', date) as ano,
+       COUNT(*) as total,
+       SUM(success) as sucessos,
+       ROUND(100.0 * SUM(success) / COUNT(*), 1) as taxa_sucesso
+FROM nss_curves
+GROUP BY ano ORDER BY ano;
+
+-- Evolução do parâmetro β₀ ao longo do tempo
+SELECT date, beta0 FROM nss_curves
+WHERE success = 1 ORDER BY date;
+```
+
+**Veja exemplo completo em:** [`examples/build_historical_database.jl`](examples/build_historical_database.jl)
+
 ## Funções de Baixo Nível
 
 Para controle mais fino ou uso customizado, você pode usar as funções de baixo nível:
@@ -241,12 +399,19 @@ Todos os scripts agora usam o módulo via `using PQRateCurve`.
 pq_rate_curve/
 ├── src/
 │   ├── PQRateCurve.jl          # Módulo principal
+│   ├── constants.jl             # Constantes do projeto
+│   ├── config_service.jl        # Gerenciamento de configuração
+│   ├── formatting.jl            # Funções de formatação
 │   ├── financial_math.jl        # Funções matemáticas puras
 │   ├── data_handling.jl         # Manipulação de dados
 │   ├── outlier_detection.jl     # Detecção de outliers
-│   └── estimation.jl            # Otimização e estimação
+│   ├── estimation.jl            # Otimização e estimação
+│   ├── persistence.jl           # Persistência SQLite
+│   └── high_level_api.jl        # API de alto nível
 ├── examples/
-│   └── basic_usage.jl           # Exemplo de uso
+│   ├── basic_usage.jl           # Exemplo de uso básico
+│   ├── high_level_usage.jl      # Exemplo de alto nível
+│   └── build_historical_database.jl  # Construir base histórica SQLite
 ├── Project.toml                 # Dependências do módulo
 └── Manifest.toml                # Lock file de versões
 ```

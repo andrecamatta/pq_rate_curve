@@ -318,6 +318,7 @@ end
     fit_curves_for_period(start_date::Date, end_date::Date;
                          config_file::String="config.toml",
                          output_csv::Union{String,Nothing}="curvas_nss",
+                         db_path::Union{String,Nothing}=nothing,
                          find_continuity::Bool=true,
                          verbose::Bool=true) -> (Vector{DayResult}, Dict{String, Any})
 
@@ -330,14 +331,22 @@ Fit NSS curves for all business days in a given period.
 # Options
 - `config_file`: Path to configuration TOML file (default: "config.toml")
 - `output_csv`: Base name for output CSV file, or `nothing` to skip saving (default: "curvas_nss")
+- `db_path`: Path to SQLite database for incremental processing, or `nothing` to disable (default: nothing)
 - `find_continuity`: Search for previous parameters for temporal continuity (default: true)
 - `verbose`: Print progress information (default: true)
+
+# Database Mode
+When `db_path` is provided:
+- Creates/opens SQLite database
+- Only processes dates missing from database (incremental mode)
+- Automatically saves each result to database
+- Can resume interrupted runs seamlessly
 
 # Returns
 - `results`: Vector of DayResult structs with fitting results for each date
 - `config`: Configuration dictionary used for fitting
 
-# Example
+# Example (Standard Mode)
 ```julia
 using PQRateCurve, Dates
 
@@ -348,22 +357,32 @@ results, config = fit_curves_for_period(
     output_csv="curvas_q1_2024",
     verbose=true
 )
+```
 
-# Check results
-successful = sum(r.success for r in results)
-println("Successfully fitted \$successful/\$(length(results)) curves")
+# Example (Database Mode)
+```julia
+# First run: processes all dates
+results, config = fit_curves_for_period(
+    Date(2015, 1, 1),
+    Date(2025, 12, 31);
+    db_path="curves.db",
+    verbose=true
+)
 
-# Access individual results
-for r in results[1:5]
-    if r.success
-        println("\$(r.date): β₀=\$(round(r.params[1], digits=4)), cost=\$(round(r.cost, digits=6))")
-    end
-end
+# Second run: only processes new dates
+# (previous results loaded from database)
+results, config = fit_curves_for_period(
+    Date(2015, 1, 1),
+    Date(2025, 12, 31);
+    db_path="curves.db",
+    verbose=true
+)
 ```
 """
 function fit_curves_for_period(start_date::Date, end_date::Date;
                                config_file::String="config.toml",
                                output_csv::Union{String,Nothing}="curvas_nss",
+                               db_path::Union{String,Nothing}=nothing,
                                find_continuity::Bool=true,
                                verbose::Bool=true)
 
@@ -371,6 +390,26 @@ function fit_curves_for_period(start_date::Date, end_date::Date;
         println("📊 FIT SEQUENCIAL DE CURVAS NSS")
         println("🔗 COM CONTINUIDADE TEMPORAL")
         println("=" ^ 50)
+    end
+
+    # Initialize database if requested
+    db = nothing
+    if db_path !== nothing
+        if verbose
+            println("💾 Modo banco de dados ativado: $db_path")
+        end
+        db = init_database(db_path)
+
+        # Show database stats
+        if verbose
+            stats = get_database_stats(db)
+            if stats.total_curves > 0
+                println("   📊 Curvas existentes: $(stats.total_curves) ($(stats.success_rate)% sucesso)")
+                println("   📅 Período: $(stats.date_range[1]) → $(stats.date_range[2])")
+            else
+                println("   📊 Banco vazio - primeira execução")
+            end
+        end
     end
 
     # Load configuration
@@ -388,38 +427,121 @@ function fit_curves_for_period(start_date::Date, end_date::Date;
 
     # Generate dates (using BusinessDays.jl with Brazilian calendar)
     all_dates = get_business_dates(start_date, end_date)
-    total_dates = length(all_dates)
 
-    if verbose
-        println("\n📅 Período: $start_date a $end_date")
-        println("📊 Datas úteis: $total_dates")
-        println("⏱️ Estimativa: $(round(total_dates * 2 / 60, digits=1)) minutos")
+    # In database mode, identify missing dates
+    dates_to_process = all_dates
+    existing_results = DayResult[]
+
+    if db !== nothing
+        missing_dates = get_missing_dates(db, start_date, end_date; only_business_days=true)
+        dates_to_process = missing_dates
+
+        if verbose
+            total_dates = length(all_dates)
+            existing_count = total_dates - length(missing_dates)
+
+            println("\n📅 Período: $start_date a $end_date")
+            println("📊 Datas úteis totais: $total_dates")
+            println("✅ Já processadas: $existing_count")
+            println("⏳ Faltam processar: $(length(missing_dates))")
+
+            if length(missing_dates) > 0
+                println("⏱️ Estimativa: $(round(length(missing_dates) * 2 / 60, digits=1)) minutos")
+            else
+                println("🎉 Todas as datas já estão processadas!")
+            end
+        end
+
+        # Load existing results from database
+        if length(missing_dates) < length(all_dates)
+            if verbose
+                println("📥 Carregando resultados existentes do banco...")
+            end
+
+            # Load all existing data for the period
+            df_existing = load_curves(db, start_date, end_date)
+            for row in eachrow(df_existing)
+                success_bool = row.success == 1
+                used_prev_bool = row.used_previous_params !== missing && row.used_previous_params == 1
+                error_msg = row.error_message !== missing ? row.error_message : nothing
+
+                result = DayResult(
+                    row.date,
+                    success_bool,
+                    success_bool ? [row.beta0, row.beta1, row.beta2, row.beta3, row.tau1, row.tau2] : nothing,
+                    success_bool ? row.cost : nothing,
+                    row.n_bonds !== missing ? row.n_bonds : 0,
+                    row.outliers_removed !== missing ? row.outliers_removed : 0,
+                    error_msg,
+                    used_prev_bool
+                )
+                push!(existing_results, result)
+            end
+        end
+    else
+        # Standard mode: process all dates
+        total_dates = length(all_dates)
+        if verbose
+            println("\n📅 Período: $start_date a $end_date")
+            println("📊 Datas úteis: $total_dates")
+            println("⏱️ Estimativa: $(round(total_dates * 2 / 60, digits=1)) minutos")
+        end
     end
 
     # Search for continuity parameters
     previous_params = nothing
     if find_continuity
-        previous_params = _find_continuity_params(start_date, config; verbose=verbose)
+        # In database mode, try to get params from database first
+        if db !== nothing && !isempty(existing_results)
+            # Find most recent successful result
+            successful_existing = filter(r -> r.success, existing_results)
+            if !isempty(successful_existing)
+                sort!(successful_existing, by=r->r.date, rev=true)
+                previous_params = successful_existing[1].params
+                if verbose
+                    println("✅ Parâmetros de continuidade obtidos do banco ($(successful_existing[1].date))")
+                end
+            end
+        end
+
+        # If not found in database, search by fitting
+        if previous_params === nothing
+            first_date = isempty(dates_to_process) ? start_date : minimum(dates_to_process)
+            previous_params = _find_continuity_params(first_date, config; verbose=verbose)
+        end
     end
 
-    if verbose
+    if verbose && length(dates_to_process) > 0
         println("\n🚀 Iniciando fit sequencial...")
     end
 
     # Sequential processing
     start_time = time()
-    all_results = DayResult[]
+    new_results = DayResult[]
     current_previous_params = previous_params
     successful_fits = 0
+    total_to_process = length(dates_to_process)
 
-    for (i, date) in enumerate(all_dates)
-        if verbose && (i % 50 == 1 || i == total_dates)
-            progress_pct = round(i/total_dates*100, digits=1)
-            println("🔄 Progresso: $i/$total_dates ($progress_pct%)")
+    for (i, date) in enumerate(dates_to_process)
+        if verbose && (i % 50 == 1 || i == total_to_process)
+            progress_pct = round(i/total_to_process*100, digits=1)
+            println("🔄 Progresso: $i/$total_to_process ($progress_pct%)")
         end
 
         result = _fit_nss_single_day(date, config, current_previous_params; verbose=verbose)
-        push!(all_results, result)
+        push!(new_results, result)
+
+        # Save to database if enabled
+        if db !== nothing
+            if result.success && result.params !== nothing
+                save_curve(db, result.date, result.params, result.cost, result.n_bonds,
+                          result.outliers_removed;
+                          success=true, used_previous_params=result.used_previous_params)
+            else
+                error_msg = result.error_message !== nothing ? result.error_message : "Falha desconhecida"
+                save_curve_failure(db, result.date, error_msg)
+            end
+        end
 
         if result.success
             current_previous_params = result.params
@@ -427,14 +549,34 @@ function fit_curves_for_period(start_date::Date, end_date::Date;
         end
     end
 
+    # Combine existing and new results
+    all_results = vcat(existing_results, new_results)
+    sort!(all_results, by=r->r.date)
+
     elapsed_time = time() - start_time
 
     if verbose
-        println("\n⏱️ Processamento completo em $(round(elapsed_time/60, digits=1)) minutos")
+        if total_to_process > 0
+            println("\n⏱️ Processamento completo em $(round(elapsed_time/60, digits=1)) minutos")
+        end
 
+        # Calculate overall statistics
+        total_successful = sum(r.success for r in all_results)
+        total_dates_overall = length(all_results)
         continuity_count = sum(r.used_previous_params for r in all_results if r.success)
-        println("🔗 Continuidade: $continuity_count/$successful_fits fits usaram previous_params")
-        println("📊 Taxa de sucesso: $(round(successful_fits/total_dates*100, digits=1))%")
+
+        if db !== nothing
+            println("\n📊 ESTATÍSTICAS FINAIS (banco de dados):")
+            println("   Datas processadas nesta execução: $total_to_process")
+            println("   Sucessos nesta execução: $successful_fits")
+            println("   Total no banco: $total_dates_overall datas")
+            println("   Total bem-sucedidas: $total_successful")
+            println("   Taxa de sucesso geral: $(round(total_successful/total_dates_overall*100, digits=1))%")
+        else
+            println("\n📊 ESTATÍSTICAS:")
+            println("🔗 Continuidade: $continuity_count/$total_successful fits usaram previous_params")
+            println("📊 Taxa de sucesso: $(round(total_successful/total_dates_overall*100, digits=1))%")
+        end
     end
 
     # Save to CSV if requested

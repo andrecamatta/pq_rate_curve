@@ -15,7 +15,7 @@ Main features:
 module PQRateCurve
 
 using Dates, Statistics, DataFrames, CSV, HTTP, ZipFile, LinearAlgebra
-using Random, Optim, TOML, JSON
+using Random, Optim, TOML, JSON, SQLite
 
 # Export main functionality
 export
@@ -52,7 +52,12 @@ export
     run_walkforward_validation, generate_pso_configs, generate_focused_pso_configs,
 
     # High-level API functions
-    fit_curves_for_period, create_yield_curve_animation, DayResult
+    fit_curves_for_period, create_yield_curve_animation, DayResult,
+
+    # Persistence (SQLite database)
+    init_database, save_curve, save_curve_failure,
+    load_curves, load_curve, curve_exists,
+    get_missing_dates, get_database_stats
 
 # Include all module files
 include("constants.jl")
@@ -62,6 +67,7 @@ include("financial_math.jl")
 include("data_handling.jl")
 include("outlier_detection.jl")
 include("estimation.jl")
+include("persistence.jl")
 include("high_level_api.jl")
 
 end # module PQRateCurve
