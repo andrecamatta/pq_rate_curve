@@ -131,7 +131,7 @@ cash_flows, quantities, info = generate_cash_flows_with_quantity(df, ref_date)
 # Otimização completa com remoção de outliers
 config = load_configuration("config.toml")
 params_otimos, custo, flows_limpos, outliers, iters =
-    optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+    fit_nss(
         cash_flows, ref_date,
         config["pso"]["lower_bounds"],
         config["pso"]["upper_bounds"];
@@ -175,7 +175,7 @@ params_otimos, custo, flows_limpos, outliers, iters =
 - Mais 10 funções de formatação especializadas
 
 **Otimização:**
-- `optimize_nelson_siegel_svensson_with_mad_outlier_removal(...)` - Otimização completa
+- `fit_nss(...)` - Otimização completa
 - `detect_outliers_mad_and_liquidity(...)` - Detecção de outliers
 - `refine_nss_with_lbfgs(...)` - Refinamento L-BFGS
 - `normalize_cost_by_volume(dates, costs)` - Normalização de custos por volume

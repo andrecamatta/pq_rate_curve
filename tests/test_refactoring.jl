@@ -59,7 +59,7 @@ try
         lower_bounds, upper_bounds = get_pso_bounds(config)
 
         # Otimiza NSS
-        params, cost, final_cash_flows, outliers, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+        params, cost, final_cash_flows, outliers, iterations = fit_nss(
             cash_flows, test_date, lower_bounds, upper_bounds;
             pso_N=30,
             pso_C1=2.0,

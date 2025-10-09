@@ -201,7 +201,7 @@ function _fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_par
         end
 
         # Optimization with outlier removal (now using fixed threshold + ultra-low liquidity filter)
-        params, cost, final_cash_flows, outliers_removed, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+        params, cost, final_cash_flows, outliers_removed, iterations = fit_nss(
             cash_flows, date, config["lower_bounds"], config["upper_bounds"];
             previous_params=previous_params,
             temporal_penalty_weight=config["temporal_penalty_weight"],

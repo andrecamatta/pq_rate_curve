@@ -356,29 +356,32 @@ function refine_nss_with_lbfgs(cash_flows, ref_date, pso_params, lower_bounds::V
 end
 
 """
-    optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, ref_date;
-                                                           previous_params=nothing,
-                                                           temporal_penalty_weight=0.01,
-                                                           pso_N=50, pso_C1=2.0, pso_C2=2.0,
-                                                           pso_omega=0.5, pso_f_calls_limit=1500,
-                                                           error_threshold_global=20.0, fator_liq=0.015,
-                                                           ultra_low_factor=3.0,
-                                                           max_iterations=5, min_bonds=3,
-                                                           bond_quantities=nothing) -> (Vector{Float64}, Float64, Vector, Int, Int)
+    fit_nss(cash_flows, ref_date;
+            previous_params=nothing,
+            temporal_penalty_weight=0.01,
+            pso_N=50, pso_C1=2.0, pso_C2=2.0,
+            pso_omega=0.5, pso_f_calls_limit=1500,
+            error_threshold_global=20.0, fator_liq=0.015,
+            ultra_low_factor=3.0,
+            max_iterations=5, min_bonds=3,
+            bond_quantities=nothing) -> (Vector{Float64}, Float64, Vector, Int, Int)
 
-Main optimization function with iterative outlier removal using FIXED THRESHOLD and liquidity criteria.
+Fit Nelson-Siegel-Svensson yield curve with automatic outlier removal.
 
-NEW APPROACH (replaces MAD-based):
+This is the main optimization function that combines PSO, outlier detection, and optional L-BFGS refinement.
+
+Outlier Removal Strategy:
 1. First, remove ultra-low liquidity bonds (qty < fator_liq/ultra_low_factor) - independent of error
 2. Then, iteratively remove high-error low-liquidity bonds (error > threshold AND qty < fator_liq)
 
 Parameters:
 - cash_flows: Vector of (market_price, cash_flow) tuples
 - ref_date: Reference date
+- lower_bounds, upper_bounds: Parameter bounds for optimization
 - previous_params: Previous day parameters for temporal continuity
 - temporal_penalty_weight: Weight for temporal penalty
 - pso_N, pso_C1, pso_C2, pso_omega, pso_f_calls_limit: PSO parameters
-- error_threshold_global: Fixed absolute error threshold for outlier detection (replaces MAD)
+- error_threshold_global: Fixed absolute error threshold for outlier detection
 - fator_liq: Liquidity percentage threshold for outlier detection
 - ultra_low_factor: Divisor for ultra-low liquidity threshold (default: 3.0)
 - max_iterations: Maximum outlier removal iterations
@@ -392,7 +395,7 @@ Returns:
 - outliers_removed: Total number of outliers removed
 - iterations_used: Number of iterations used
 """
-function optimize_nelson_siegel_svensson_with_mad_outlier_removal(cash_flows, ref_date, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
+function fit_nss(cash_flows, ref_date, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64};
                                                                  previous_params=nothing,
                                                                  temporal_penalty_weight=0.01,
                                                                  pso_N=50, pso_C1=2.0, pso_C2=2.0,

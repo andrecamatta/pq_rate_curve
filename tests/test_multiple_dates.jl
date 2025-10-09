@@ -48,7 +48,7 @@ for test_date in test_dates
         previous_params = length(params_history) > 0 ? params_history[end] : nothing
 
         # Otimiza NSS
-        params, cost, final_cash_flows, outliers, iterations = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+        params, cost, final_cash_flows, outliers, iterations = fit_nss(
             cash_flows, test_date, lower_bounds, upper_bounds;
             previous_params=previous_params,
             temporal_penalty_weight=0.01,

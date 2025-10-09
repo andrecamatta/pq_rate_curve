@@ -43,7 +43,7 @@ export
     detect_outliers_mad_and_liquidity, calculate_mad,
 
     # Optimization and estimation
-    optimize_nelson_siegel_svensson_with_mad_outlier_removal,
+    fit_nss,
     refine_nss_with_lbfgs, calculate_pricing_error_duration_only,
     calculate_out_of_sample_cost_reais, precompute_cash_flow_times,
     normalize_cost_by_volume,

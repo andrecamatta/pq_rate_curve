@@ -106,7 +106,7 @@ end
             lower_bounds, upper_bounds = get_pso_bounds(config)
 
             # Uses new fixed threshold + ultra-low liquidity filter
-            params, cost, final_cash_flows, _, _ = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+            params, cost, final_cash_flows, _, _ = fit_nss(
                 cash_flows, train_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
                 temporal_penalty_weight=pso_params.temporal_penalty_weight,
@@ -200,7 +200,7 @@ end
             lower_bounds, upper_bounds = get_pso_bounds(config)
 
             # Uses new fixed threshold + ultra-low liquidity filter (obtains parameters)
-            params, optimization_cost, final_cash_flows, _, _ = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+            params, optimization_cost, final_cash_flows, _, _ = fit_nss(
                 cash_flows, test_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
                 temporal_penalty_weight=pso_params.temporal_penalty_weight,

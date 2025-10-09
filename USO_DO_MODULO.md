@@ -68,7 +68,7 @@ lower_bounds = config["pso"]["lower_bounds"]
 upper_bounds = config["pso"]["upper_bounds"]
 
 optimal_params, cost, clean_flows, outliers, iters =
-    optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+    fit_nss(
         cash_flows, ref_date, lower_bounds, upper_bounds;
         bond_quantities=quantities,
         pso_N=config["pso"]["N"]
@@ -211,7 +211,7 @@ Para controle mais fino ou uso customizado, você pode usar as funções de baix
 - `calculate_mad(values)` - Calcula MAD
 
 ### Otimização
-- `optimize_nelson_siegel_svensson_with_mad_outlier_removal(...)` - Otimização completa
+- `fit_nss(...)` - Otimização completa
 - `refine_nss_with_lbfgs(...)` - Refinamento L-BFGS
 - `calculate_out_of_sample_cost_reais(...)` - Calcula custo out-of-sample
 - `precompute_cash_flow_times(cash_flows, ref_date)` - Pré-calcula tempos
