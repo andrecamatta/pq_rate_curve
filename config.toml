@@ -8,8 +8,9 @@ C2 = 1.3
 omega = 0.45
 f_calls_limit = 1500
 # Bounds balanceados: flexibilidade matemática + realismo econômico
+# β3 upper reduzido de 0.20→0.05 para evitar mínimos locais patológicos
 lower_bounds = [0.02, -0.20, -0.35, -0.35, 0.2, 0.3]
-upper_bounds = [0.40, 0.20, 0.20, 0.20, 12.0, 25.0]
+upper_bounds = [0.40, 0.20, 0.20, 0.05, 12.0, 25.0]
 
 [optimization]
 use_lbfgs = true
@@ -18,13 +19,19 @@ temporal_penalty_weight = 0.01
 [outlier_detection]
 mad_threshold = 12.0
 fator_liq = 0.015
+error_threshold_global = 20.0  # Threshold absoluto de erro (substitui MAD relativo)
+ultra_low_factor = 3.0          # Remove se qty < fator_liq/3 (independente de erro)
+
+[cache]
+# Revalidar cache do mês corrente após X horas
+max_age_hours = 24
+# Forçar redownload ignorando cache (use com cuidado)
+force_redownload = false
 
 [fit_curves]
 continuity_search_days = 30
 min_bonds_for_fit = 3
 lbfgs_max_iterations = 50
-reoptimization_cost_multiplier = 10.0
-reoptimization_pso_multiplier = 2.0
 
 [animation]
 fps = 10
@@ -85,6 +92,12 @@ train_end = "2024-04-30"
 test_start = "2024-05-01"
 test_end = "2024-05-31"
 
+[[cross_validation.blocks]]
+train_start = "2025-06-09"
+train_end = "2025-07-08"
+test_start = "2025-07-09"
+test_end = "2025-08-07"
+
 # Hyperparameter Search Ranges for Bayesian Optimization
 [hyperparameter_search]
 # PSO Population Size
@@ -109,13 +122,17 @@ f_calls_max = 2500
 temporal_penalty_min = 0.0001
 temporal_penalty_max = 0.2
 
-# MAD Threshold (outlier detection)
-mad_threshold_min = 6.0
-mad_threshold_max = 12.0
+# Fixed Error Threshold (replaces MAD-based threshold)
+error_threshold_global_min = 10.0
+error_threshold_global_max = 50.0
 
 # Liquidity Factor (outlier detection)
 fator_liq_min = 0.001
 fator_liq_max = 0.015
+
+# Ultra-low Liquidity Factor (independent filter)
+ultra_low_factor_min = 2.0
+ultra_low_factor_max = 5.0
 
 # L-BFGS Usage Probability (0=never, 1=always)
 use_lbfgs_prob_min = 0.0

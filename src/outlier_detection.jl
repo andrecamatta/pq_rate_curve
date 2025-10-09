@@ -7,9 +7,6 @@ Median Absolute Deviation (MAD) and liquidity criteria.
 
 using Statistics
 
-# Include dependencies
-include("financial_math.jl")
-
 """
     calculate_mad(values::Vector{Float64}) -> Float64
 
@@ -211,4 +208,115 @@ function print_outlier_summary(outlier_indices, errors, mad_value, error_thresho
     end
     
     println("🗑️  Removidos $(length(outlier_indices)) outliers. Títulos restantes: $(length(cash_flows) - length(outlier_indices))")
+end
+
+"""
+    detect_ultra_low_liquidity(bond_quantities; fator_liq=0.015, ultra_low_factor=3.0) -> Vector{Int}
+
+Detect bonds with ultra-low liquidity (independent of pricing error).
+This filter removes bonds that are traded in extremely low volumes, which are often:
+- Data errors (e.g., volume=1)
+- Non-market transactions (accounting adjustments)
+- Bonds with unreliable pricing
+
+Parameters:
+- bond_quantities: Vector with trading quantities
+- fator_liq: Base liquidity percentage threshold (default: 0.015 = 1.5%)
+- ultra_low_factor: Divisor for ultra-low threshold (default: 3.0)
+
+Returns:
+- outlier_indices: Indices of bonds with ultra-low liquidity
+
+Example:
+If fator_liq=0.015 and ultra_low_factor=3.0:
+- Normal threshold: 1.5% of total volume
+- Ultra-low threshold: 0.5% of total volume (1.5% / 3)
+- Bonds with qty < 0.5% of total are removed regardless of error
+"""
+function detect_ultra_low_liquidity(bond_quantities; fator_liq=0.015, ultra_low_factor=3.0)
+    if isempty(bond_quantities)
+        return Int[]
+    end
+
+    total_quantity = sum(bond_quantities)
+    ultra_low_threshold = (fator_liq / ultra_low_factor) * total_quantity
+
+    outlier_indices = Int[]
+    for (i, quantity) in enumerate(bond_quantities)
+        if quantity < ultra_low_threshold
+            push!(outlier_indices, i)
+        end
+    end
+
+    return outlier_indices
+end
+
+"""
+    detect_outliers_fixed_threshold(cash_flows, bond_quantities, ref_date, params;
+                                    error_threshold_global=20.0, fator_liq=0.015) -> (Vector{Int}, Vector{Float64}, Float64)
+
+Detect outliers using FIXED GLOBAL threshold (instead of MAD-based relative threshold).
+This approach is more predictable and robust to extreme outliers.
+
+A bond is classified as outlier if it satisfies BOTH conditions:
+1. Absolute error > error_threshold_global (fixed value, e.g., 20.0)
+2. Trading quantity < fator_liq % of total volume
+
+Parameters:
+- cash_flows: List of (market_price, cash_flow) tuples
+- bond_quantities: Vector with corresponding trading quantities
+- ref_date: Reference date
+- params: Current NSS parameters
+- error_threshold_global: Fixed absolute error threshold (default: 20.0)
+- fator_liq: Percentage of total quantity for low liquidity (default: 0.015 = 1.5%)
+
+Returns:
+- outlier_indices: Indices of bonds classified as outliers
+- errors: Vector with pricing errors for all bonds
+- mean_error: Mean absolute error (for reporting)
+
+Key differences from MAD-based approach:
+- Uses FIXED threshold instead of MAD × factor
+- More predictable behavior across different days
+- Less sensitive to extreme outliers distorting MAD calculation
+"""
+function detect_outliers_fixed_threshold(cash_flows, bond_quantities, ref_date, params;
+                                        error_threshold_global=20.0, fator_liq=0.015)
+    if isempty(cash_flows)
+        return Int[], Float64[], 0.0
+    end
+
+    # Calculate pricing errors for all bonds
+    errors = Float64[]
+    for (market_price, cash_flow) in cash_flows
+        theoretical_price = price_bond(cash_flow, ref_date, params)
+        error_abs = abs(theoretical_price - market_price)
+        push!(errors, error_abs)
+    end
+
+    # Calculate mean error for reporting
+    mean_error = mean(errors)
+
+    # Calculate liquidity threshold
+    total_quantity = sum(bond_quantities)
+    liquidity_threshold = fator_liq * total_quantity
+
+    # Identify outliers that satisfy BOTH conditions
+    outlier_indices = Int[]
+    for (i, error) in enumerate(errors)
+        quantity = bond_quantities[i]
+
+        # Condition 1: High error (fixed threshold)
+        high_error = error > error_threshold_global
+
+        # Condition 2: Low liquidity
+        low_liquidity = quantity < liquidity_threshold
+
+        # Outlier only if BOTH conditions are true
+        if high_error && low_liquidity
+            push!(outlier_indices, i)
+        end
+    end
+
+    return outlier_indices, errors, mean_error
 end

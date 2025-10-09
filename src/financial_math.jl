@@ -31,13 +31,13 @@ Returns:
 """
 function nss_rate(t, p)
     # Handle the limit for t -> 0 to avoid numerical instability
-    if t < 1e-6
+    if t < NSS_MIN_TIME
         return p[1] + p[2]
     end
 
     # Evita divisão por zero e garante positividade dos taus
-    tau1 = max(abs(p[5]), 0.005)
-    tau2 = max(abs(p[6]), 0.005)
+    tau1 = max(abs(p[5]), TAU_MIN_VALUE)
+    tau2 = max(abs(p[6]), TAU_MIN_VALUE)
     
     val1 = t / tau1
     val2 = t / tau2
@@ -52,7 +52,7 @@ function nss_rate(t, p)
     rate = p[1] + p[2] * lambda1 + p[3] * lambda2 + p[4] * lambda3
 
     if isnan(rate) || isinf(rate)
-        return 1e9 # Retorna um valor alto para penalizar
+        return NSS_INVALID_RATE_PENALTY # Retorna um valor alto para penalizar
     end
 
     return rate
@@ -261,9 +261,9 @@ function validate_discount_factors(params; max_maturity_years=30.0)
 
     for t in time_points
         rate = nss_rate(t, params)
-        
+
         # Permitir taxas levemente negativas (até -2%) e limitar superiormente
-        if rate < -0.02 || rate > 1.0  # Mais realista que a restrição anterior
+        if rate < MIN_ALLOWED_RATE || rate > MAX_ALLOWED_RATE
             return false
         end
         

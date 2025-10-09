@@ -4,8 +4,8 @@ using Distributed, TOML, Logging
 
 # Configuração de workers para processamento paralelo a partir do config.toml
 function setup_workers()
-    config = TOML.parsefile("config.toml")
-    cv_config = get(config, "cross_validation", Dict())
+    config_service = PQRateCurve.default_config()
+    cv_config = PQRateCurve.get_cv_config(config_service)
     max_cores = get(cv_config, "max_cores", Sys.CPU_THREADS)
 
     if nworkers() == 1
@@ -17,21 +17,9 @@ end
 
 setup_workers()
 
-# 1. Carrega o módulo no processo principal (apenas uma vez, suprimindo warnings de docs)
-if !isdefined(Main, :PQRateCurve)
-    with_logger(NullLogger()) do
-        include(joinpath(@__DIR__, "src/PQRateCurve.jl"))
-    end
-end
-
-# 2. Importa o módulo em todos os workers (suprimindo warnings de docs)
-@everywhere using Distributed, Logging
-@everywhere if !isdefined(Main, :PQRateCurve)
-    with_logger(NullLogger()) do
-        include(joinpath(@__DIR__, "src/PQRateCurve.jl"))
-    end
-end
-@everywhere using Main.PQRateCurve
+# Carrega o módulo no processo principal e em todos os workers
+using PQRateCurve
+@everywhere using PQRateCurve
 
 # 3. Carrega dependências básicas em todos os processos
 using Dates, Statistics, DataFrames, TOML
@@ -46,22 +34,6 @@ println("🎯 WALK-FORWARD CONTÍNUO PSO+L-BFGS - Blocos de 30 dias")
 println("=" ^ 60)
 println("🔄 Modo: PARALELO ($(nworkers()) workers)")
 
-# Gera todas as datas úteis em um período
-@everywhere function get_business_dates(start_date::Date, end_date::Date)
-    dates = Date[]
-    current = start_date
-    
-    while current <= end_date
-        weekday = Dates.dayofweek(current)
-        if 1 <= weekday <= 5  # Segunda a sexta
-            push!(dates, current)
-        end
-        current += Day(1)
-    end
-    
-    return dates
-end
-
 @everywhere struct PSOHyperparams
     N::Int
     C1::Float64
@@ -70,8 +42,9 @@ end
     f_calls_limit::Int
     use_lbfgs::Bool
     temporal_penalty_weight::Float64
-    mad_threshold::Float64
+    error_threshold_global::Float64  # Replaced MAD-based threshold
     fator_liq::Float64
+    ultra_low_factor::Float64  # NEW: independent ultra-low liquidity filter
 end
 
 # Cache global para armazenar resultados de todas as avaliações da Otimização Bayesiana
@@ -83,8 +56,8 @@ global BAYESIAN_START_TIME = 0.0
 
 # Carrega blocos de treino/teste a partir do config.toml
 function get_continuous_blocks_from_config()
-    config = TOML.parsefile("config.toml")
-    cv_config = get(config, "cross_validation", Dict())
+    config_service = PQRateCurve.default_config()
+    cv_config = PQRateCurve.get_cv_config(config_service)
     block_configs = get(cv_config, "blocks", [])
 
     if isempty(block_configs)
@@ -107,31 +80,32 @@ end
     best_params = nothing
     costs = Float64[]
     successful_days = 0
-    
-    # Load bounds from config file inside the worker
-    config = TOML.parsefile("config.toml")
-    pso_config = get(config, "pso", Dict())
-    lower_bounds = get(pso_config, "lower_bounds", [0.01, -0.25, -0.30, -0.20, 0.5, 2.0])
-    upper_bounds = get(pso_config, "upper_bounds", [0.30, 0.25, 0.30, 0.20, 20.0, 50.0])
+
+    # Load config file inside the worker using ConfigService
+    config_service = PQRateCurve.load_config("config.toml")
+    config = PQRateCurve.get_raw_config(config_service)
 
     for (day_idx, train_date) in enumerate(train_dates)
         try
             df = load_bacen_data(train_date, train_date)
-            
+
             if nrow(df) < 3
                 if verbose
                     println("❌ Dados insuficientes para $train_date: $(nrow(df)) linhas")
                 end
                 continue
             end
-            
+
             # Aproveita parâmetros do dia anterior
             previous_params = (day_idx > 1 && best_params !== nothing) ? best_params : nothing
-            
+
             # Gera cash flows com informação de quantidade para MAD híbrido
             cash_flows, bond_quantities, _ = generate_cash_flows_with_quantity(df, train_date)
-            
-            # Usa nova função MAD para otimização com liquidez
+
+            # Get bounds from config (single source of truth)
+            lower_bounds, upper_bounds = get_pso_bounds(config)
+
+            # Uses new fixed threshold + ultra-low liquidity filter
             params, cost, final_cash_flows, _, _ = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
                 cash_flows, train_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
@@ -141,9 +115,10 @@ end
                 pso_C2=pso_params.C2,
                 pso_omega=pso_params.ω,
                 pso_f_calls_limit=pso_params.f_calls_limit,
-                fator_erro=pso_params.mad_threshold,
-                max_iterations=train_max_iterations,
+                error_threshold_global=pso_params.error_threshold_global,
                 fator_liq=pso_params.fator_liq,
+                ultra_low_factor=pso_params.ultra_low_factor,
+                max_iterations=train_max_iterations,
                 bond_quantities=bond_quantities,
                 verbose=verbose
             )
@@ -184,26 +159,9 @@ end
     end
     
     if successful_days > 0 && best_params !== nothing
-        # Soma os custos diários em MÓDULO (valor absoluto)
-        total_train_cost_reais = sum(abs.(costs))
-        
-        # Calcula volume total negociado no período de treino para normalização
-        total_train_volume = 0.0
-        for (train_date, _) in zip(train_dates, costs)
-            try
-                df = load_bacen_data(train_date, train_date)
-                if nrow(df) >= 3
-                    _, bond_quantities, _ = generate_cash_flows_with_quantity(df, train_date)
-                    total_train_volume += sum(bond_quantities)
-                end
-            catch
-                continue
-            end
-        end
-        
-        # Normaliza pelo volume total (custo por unidade de volume)
-        normalized_train_cost = total_train_volume > 0 ? total_train_cost_reais / total_train_volume : total_train_cost_reais
-        
+        # Normalize costs by trading volume (DRY - uses centralized function)
+        normalized_train_cost = normalize_cost_by_volume(train_dates, costs)
+
         return best_params, normalized_train_cost, successful_days
     else
         return nothing, Inf, 0
@@ -217,12 +175,10 @@ end
     successful_days = 0
     current_params = initial_params
 
-    # Load bounds from config file inside the worker
-    config = TOML.parsefile("config.toml")
-    pso_config = get(config, "pso", Dict())
-    lower_bounds = get(pso_config, "lower_bounds", [0.01, -0.25, -0.30, -0.20, 0.5, 2.0])
-    upper_bounds = get(pso_config, "upper_bounds", [0.30, 0.25, 0.30, 0.20, 20.0, 50.0])
-    
+    # Load config file inside the worker using ConfigService
+    config_service = PQRateCurve.load_config("config.toml")
+    config = PQRateCurve.get_raw_config(config_service)
+
     for (_, test_date) in enumerate(test_dates)
         try
             df = load_bacen_data(test_date, test_date)
@@ -233,14 +189,17 @@ end
             
             # Re-otimiza para o dia de teste, usando o dia anterior como base
             previous_params = current_params
-            
+
             # Gera cash flows com informação de quantidade para MAD híbrido
             cash_flows, bond_quantities, _ = generate_cash_flows_with_quantity(df, test_date)
-            
+
             # CORREÇÃO VAZAMENTO DE DADOS: Armazena dados brutos do dia
             raw_cash_flows = copy(cash_flows)
-            
-            # Usa nova função MAD para otimização com liquidez (obtém parâmetros)
+
+            # Get bounds from config (single source of truth)
+            lower_bounds, upper_bounds = get_pso_bounds(config)
+
+            # Uses new fixed threshold + ultra-low liquidity filter (obtains parameters)
             params, optimization_cost, final_cash_flows, _, _ = optimize_nelson_siegel_svensson_with_mad_outlier_removal(
                 cash_flows, test_date, lower_bounds, upper_bounds;
                 previous_params=previous_params,
@@ -250,9 +209,10 @@ end
                 pso_C2=pso_params.C2,
                 pso_omega=pso_params.ω,
                 pso_f_calls_limit=pso_params.f_calls_limit,
-                max_iterations=train_max_iterations,
-                fator_erro=pso_params.mad_threshold,
+                error_threshold_global=pso_params.error_threshold_global,
                 fator_liq=pso_params.fator_liq,
+                ultra_low_factor=pso_params.ultra_low_factor,
+                max_iterations=train_max_iterations,
                 bond_quantities=bond_quantities,
                 verbose=verbose
             )
@@ -300,26 +260,10 @@ end
     end
     
     if successful_days > 0
-        # Soma os custos diários em MÓDULO (valor absoluto) - total do bloco de 30 dias
-        total_test_cost_reais = sum(abs.(test_costs))
-        
-        # Calcula volume total negociado no período de teste para normalização
-        total_test_volume = 0.0
-        for (test_date, cost) in zip(test_dates, test_costs)
-            try
-                df = load_bacen_data(test_date, test_date)
-                if nrow(df) >= 3
-                    _, bond_quantities, _ = generate_cash_flows_with_quantity(df, test_date)
-                    total_test_volume += sum(bond_quantities)
-                end
-            catch
-                continue
-            end
-        end
-        
-        # Normaliza pelo volume total (custo por unidade de volume)
-        normalized_test_cost = total_test_volume > 0 ? total_test_cost_reais / total_test_volume : total_test_cost_reais
-        
+        # Normalize costs by trading volume (DRY - uses centralized function)
+        # Only process dates that were successfully tested (break on error means sequential days)
+        normalized_test_cost = normalize_cost_by_volume(test_dates[1:length(test_costs)], test_costs)
+
         # Calcula estabilidade dos vértices
         vertex_stability = calculate_vertex_stability(test_params_history, stability_vertices)
         
@@ -422,7 +366,7 @@ end
 
 # Walk-forward para uma configuração PSO - VERSÃO PARALELA
 function continuous_walkforward_single_config(pso_params::PSOHyperparams, blocks, cv_config::Dict)
-    config_name = "N=$(pso_params.N)_C1=$(round(pso_params.C1,digits=2))_LBFGS=$(pso_params.use_lbfgs)_TW=$(round(pso_params.temporal_penalty_weight,digits=4))_MAD=$(pso_params.mad_threshold)_LIQ=$(pso_params.fator_liq)"
+    config_name = "N=$(pso_params.N)_C1=$(round(pso_params.C1,digits=2))_LBFGS=$(pso_params.use_lbfgs)_TW=$(round(pso_params.temporal_penalty_weight,digits=4))_ERR=$(pso_params.error_threshold_global)_LIQ=$(pso_params.fator_liq)_ULF=$(pso_params.ultra_low_factor)"
     
     # Mensagem simplificada - removida a redundante
     println("   🔄 Distribuindo $(length(blocks)) blocos entre $(nworkers()) workers...")
@@ -457,7 +401,8 @@ function bayesian_objective(params_vector)
     BAYESIAN_COUNTER += 1
     
     # Proteção adicional contra execução excessiva em modo teste - apenas uma vez
-    config = TOML.parsefile("config.toml")
+    config_service = PQRateCurve.default_config()
+    config = PQRateCurve.get_raw_config(config_service)
     max_configs = config["validation"]["num_hyperparameter_configs"]
     if BAYESIAN_COUNTER > max_configs * 20  # Mais permissivo para o DE funcionar
         if BAYESIAN_COUNTER == max_configs * 20 + 1  # Mostra mensagem apenas uma vez
@@ -467,7 +412,7 @@ function bayesian_objective(params_vector)
     end
     
     # Extrai parâmetros do vetor
-    # [N, C1, C2, omega, f_calls, use_lbfgs_prob, temporal_penalty_weight, mad_threshold, fator_liq]
+    # [N, C1, C2, omega, f_calls, use_lbfgs_prob, temporal_penalty_weight, error_threshold_global, fator_liq, ultra_low_factor]
     N = params_vector[1]
     C1 = params_vector[2]
     C2 = params_vector[3]
@@ -475,31 +420,33 @@ function bayesian_objective(params_vector)
     f_calls_idx = params_vector[5]
     use_lbfgs_prob = params_vector[6]
     temporal_penalty_weight = params_vector[7]
-    mad_threshold = params_vector[8]
+    error_threshold_global = params_vector[8]
     fator_liq = params_vector[9]
-    
+    ultra_low_factor = params_vector[10]
+
     # Converte probabilidade use_lbfgs para booleano - FIXADO EM FALSE
     use_lbfgs = false  # use_lbfgs_prob > 0.5
-    
+
     # f_calls como valor contínuo
     f_calls = round(Int, params_vector[5])
-    
+
     # Cria parâmetros PSO
     pso_params = PSOHyperparams(
         round(Int, N),
         C1, C2, omega,
         f_calls,
-        use_lm,
+        use_lbfgs,
         temporal_penalty_weight,
-        mad_threshold,
-        fator_liq
+        error_threshold_global,
+        fator_liq,
+        ultra_low_factor
     )
     
     # Calcula tempo estimado
     elapsed = time() - BAYESIAN_START_TIME
     avg_time_per_config = elapsed > 0 ? elapsed / (BAYESIAN_COUNTER - 1) : 0
     
-    println("⚙️  [$BAYESIAN_COUNTER] Avaliando configuração: N=$(pso_params.N), C1=$(round(pso_params.C1,digits=2)), C2=$(round(pso_params.C2,digits=2)), ω=$(round(pso_params.ω,digits=2)), F=$(pso_params.f_calls_limit), L-BFGS=$(pso_params.use_lbfgs), TW=$(round(pso_params.temporal_penalty_weight,digits=4)), MAD=$(round(pso_params.mad_threshold,digits=3)), LIQ=$(round(pso_params.fator_liq,digits=4))")
+    println("⚙️  [$BAYESIAN_COUNTER] Avaliando configuração: N=$(pso_params.N), C1=$(round(pso_params.C1,digits=2)), C2=$(round(pso_params.C2,digits=2)), ω=$(round(pso_params.ω,digits=2)), F=$(pso_params.f_calls_limit), L-BFGS=$(pso_params.use_lbfgs), TW=$(round(pso_params.temporal_penalty_weight,digits=4)), ERR=$(round(pso_params.error_threshold_global,digits=2)), LIQ=$(round(pso_params.fator_liq,digits=4)), ULF=$(round(pso_params.ultra_low_factor,digits=2))")
     if BAYESIAN_COUNTER > 1
         println("   ⏱️  Tempo médio por configuração: $(round(avg_time_per_config, digits=1))s")
     end
@@ -559,20 +506,20 @@ end
 function run_continuous_walkforward()
     println("⚙️  Configurando walk-forward contínuo com OTIMIZAÇÃO BAYESIANA...")
     
-    # Carrega configuração do arquivo TOML
-    config = TOML.parsefile("config.toml")
+    # Carrega configuração usando ConfigService
+    config_service = PQRateCurve.default_config()
+    config = PQRateCurve.get_raw_config(config_service)
     validation_config = get(config, "validation", Dict())
-    cv_config = get(config, "cross_validation", Dict())
+    cv_config = PQRateCurve.get_cv_config(config_service)
     num_evaluations = get(validation_config, "num_hyperparameter_configs", 20)
-    
+
     blocks = get_continuous_blocks_from_config()
-    
+
     println("📊 Blocos contínuos: $(length(blocks))")
     println("📊 Avaliações Bayesianas: $num_evaluations")
     println("📊 Cada bloco: 30 dias treino → 30 dias teste (conforme config.toml)")
-    # Load hyperparameter ranges for display
-    config = TOML.parsefile("config.toml")
-    hyperparams_config = get(config, "hyperparameter_search", Dict())
+    # Get hyperparameter ranges for display
+    hyperparams_config = PQRateCurve.get_hyperparams_config(config_service)
     
     println("📊 Espaço de busca (config.toml):")
     println("   • N ∈ [$(get(hyperparams_config, "N_min", 25)), $(get(hyperparams_config, "N_max", 80))] (população PSO)")
@@ -582,8 +529,9 @@ function run_continuous_walkforward()
     println("   • f_calls ∈ [$(get(hyperparams_config, "f_calls_min", 600)), $(get(hyperparams_config, "f_calls_max", 2500))] (limite de avaliações)")
     println("   • use_lbfgs ∈ [$(get(hyperparams_config, "use_lbfgs_prob_min", 0.0)), $(get(hyperparams_config, "use_lbfgs_prob_max", 1.0))] (prob. refinamento L-BFGS)")
     println("   • temporal_penalty ∈ [$(get(hyperparams_config, "temporal_penalty_min", 0.0001)), $(get(hyperparams_config, "temporal_penalty_max", 0.2))] (penalidade temporal)")
-    println("   • mad_threshold ∈ [$(get(hyperparams_config, "mad_threshold_min", 6.0)), $(get(hyperparams_config, "mad_threshold_max", 12.0))] (limite MAD)")
+    println("   • error_threshold_global ∈ [$(get(hyperparams_config, "error_threshold_global_min", 10.0)), $(get(hyperparams_config, "error_threshold_global_max", 50.0))] (threshold fixo de erro)")
     println("   • fator_liq ∈ [$(get(hyperparams_config, "fator_liq_min", 0.001)), $(get(hyperparams_config, "fator_liq_max", 0.015))] (fator liquidez)")
+    println("   • ultra_low_factor ∈ [$(get(hyperparams_config, "ultra_low_factor_min", 2.0)), $(get(hyperparams_config, "ultra_low_factor_max", 5.0))] (filtro ultra-baixa liquidez)")
     println("📊 Regimes testados: Crise-Política-2015, Recessão-2016, Recuperação-2018, Pandemia-2020, Inflação-2022, Normalização-2024")
     println("📊 Método: Metaheuristics.jl with Differential Evolution + PARALELIZAÇÃO")
     println("⏱️  Estimativa: ~$(round(num_evaluations * 0.6, digits=1)) MINUTOS - Bayesian Optimization PARALELA PROFUNDA")
@@ -596,11 +544,10 @@ function run_continuous_walkforward()
     println("\n🚀 Iniciando Otimização Bayesiana...")
     start_time = time()
     BAYESIAN_START_TIME = start_time
-    
-    # Load hyperparameter search ranges from config.toml
-    config = TOML.parsefile("config.toml")
-    hyperparams_config = get(config, "hyperparameter_search", Dict())
-    
+
+    # Hyperparameter search ranges already loaded above via ConfigService
+    # (reusing the same config_service and hyperparams_config from earlier)
+
     # Define search space with values from config or sensible defaults
     search_range = [
         (get(hyperparams_config, "N_min", 25.0), get(hyperparams_config, "N_max", 80.0)),
@@ -610,8 +557,9 @@ function run_continuous_walkforward()
         (get(hyperparams_config, "f_calls_min", 600.0), get(hyperparams_config, "f_calls_max", 2500.0)),
         (get(hyperparams_config, "use_lbfgs_prob_min", 0.0), get(hyperparams_config, "use_lbfgs_prob_max", 1.0)),
         (get(hyperparams_config, "temporal_penalty_min", 0.0001), get(hyperparams_config, "temporal_penalty_max", 0.2)),
-        (get(hyperparams_config, "mad_threshold_min", 6.0), get(hyperparams_config, "mad_threshold_max", 12.0)),
-        (get(hyperparams_config, "fator_liq_min", 0.001), get(hyperparams_config, "fator_liq_max", 0.015))
+        (get(hyperparams_config, "error_threshold_global_min", 10.0), get(hyperparams_config, "error_threshold_global_max", 50.0)),
+        (get(hyperparams_config, "fator_liq_min", 0.001), get(hyperparams_config, "fator_liq_max", 0.015)),
+        (get(hyperparams_config, "ultra_low_factor_min", 2.0), get(hyperparams_config, "ultra_low_factor_max", 5.0))
     ]
     
     # Define bounds para Metaheuristics.jl
@@ -750,33 +698,35 @@ function final_pso_vs_lm_comparison(best_pso_params::PSOHyperparams, cv_config::
     println("=" ^ 80)
     println("🎯 Usando melhor configuração PSO encontrada na busca Bayesiana")
     println("⚙️  Config base: N=$(best_pso_params.N), C1=$(best_pso_params.C1), C2=$(best_pso_params.C2), ω=$(best_pso_params.ω)")
-    println("🔧 Parâmetros: TW=$(best_pso_params.temporal_penalty_weight), MAD=$(best_pso_params.mad_threshold), LIQ=$(best_pso_params.fator_liq)")
+    println("🔧 Parâmetros: TW=$(best_pso_params.temporal_penalty_weight), ERR=$(best_pso_params.error_threshold_global), LIQ=$(best_pso_params.fator_liq), ULF=$(best_pso_params.ultra_low_factor)")
     
     blocks = get_continuous_blocks_from_config()
     
     # Cria duas versões: PSO puro e PSO+L-BFGS
     pso_only_params = PSOHyperparams(
         best_pso_params.N,
-        best_pso_params.C1, 
+        best_pso_params.C1,
         best_pso_params.C2,
         best_pso_params.ω,
         best_pso_params.f_calls_limit,
         false,  # PSO puro
         best_pso_params.temporal_penalty_weight,
-        best_pso_params.mad_threshold,
-        best_pso_params.fator_liq
+        best_pso_params.error_threshold_global,
+        best_pso_params.fator_liq,
+        best_pso_params.ultra_low_factor
     )
-    
+
     pso_lbfgs_params = PSOHyperparams(
         best_pso_params.N,
         best_pso_params.C1,
-        best_pso_params.C2, 
+        best_pso_params.C2,
         best_pso_params.ω,
         best_pso_params.f_calls_limit,
         true,  # PSO+L-BFGS
         best_pso_params.temporal_penalty_weight,
-        best_pso_params.mad_threshold,
-        best_pso_params.fator_liq
+        best_pso_params.error_threshold_global,
+        best_pso_params.fator_liq,
+        best_pso_params.ultra_low_factor
     )
     
     println("\n🚀 Executando validação cruzada para PSO PURO...")
@@ -877,7 +827,7 @@ function _print_bayesian_ranking_table(sorted_results)
         lbfgs_icon = params.use_lbfgs ? "✅" : "❌"
         hybrid_score = result.hybrid_score_normalized
 
-        println("  $rank. N=$(params.N), C1=$(round(params.C1,digits=2)), C2=$(round(params.C2,digits=2)), ω=$(round(params.ω,digits=2)), L-BFGS=$lbfgs_icon, TW=$(round(params.temporal_penalty_weight,digits=4)), MAD=$(round(params.mad_threshold,digits=3)), LIQ=$(round(params.fator_liq,digits=4))")
+        println("  $rank. N=$(params.N), C1=$(round(params.C1,digits=2)), C2=$(round(params.C2,digits=2)), ω=$(round(params.ω,digits=2)), L-BFGS=$lbfgs_icon, TW=$(round(params.temporal_penalty_weight,digits=4)), ERR=$(round(params.error_threshold_global,digits=2)), LIQ=$(round(params.fator_liq,digits=4)), ULF=$(round(params.ultra_low_factor,digits=2))")
         println("     🏆 Score HÍBRIDO: $(round(hybrid_score, digits=3)) (quanto MAIOR melhor - 0-1)")
         println("     🎯 Teste normalizado: $(round(result.avg_test_cost_normalized, digits=6)) ± $(round(result.test_cost_std, digits=6))")
         println("     🌊 Estabilidade: $(round(result.avg_vertex_stability, digits=1)) ± $(round(result.stability_std, digits=1)) bp/dia")
@@ -918,13 +868,13 @@ function analyze_continuous_results(results, _)
         best_lbfgs = pso_lbfgs[1]
         
         println("  🥇 Melhor PSO puro:")
-        println("     Config: N=$(best_pso[1].N), C1=$(best_pso[1].C1), TW=$(best_pso[1].temporal_penalty_weight), MAD=$(best_pso[1].mad_threshold), LIQ=$(best_pso[1].fator_liq)")
+        println("     Config: N=$(best_pso[1].N), C1=$(best_pso[1].C1), TW=$(best_pso[1].temporal_penalty_weight), ERR=$(best_pso[1].error_threshold_global), LIQ=$(best_pso[1].fator_liq), ULF=$(best_pso[1].ultra_low_factor)")
         println("     Teste normalizado: $(round(best_pso[2].avg_test_cost_normalized, digits=6))")
         println("     Overfitting: $(round(best_pso[2].overfitting_ratio, digits=2))")
         println("     Estabilidade: $(round(best_pso[2].avg_vertex_stability, digits=1)) bp/dia")
-        
+
         println("  🥇 Melhor PSO+L-BFGS:")
-        println("     Config: N=$(best_lbfgs[1].N), C1=$(best_lbfgs[1].C1), TW=$(best_lbfgs[1].temporal_penalty_weight), MAD=$(best_lbfgs[1].mad_threshold), LIQ=$(best_lbfgs[1].fator_liq)")
+        println("     Config: N=$(best_lbfgs[1].N), C1=$(best_lbfgs[1].C1), TW=$(best_lbfgs[1].temporal_penalty_weight), ERR=$(best_lbfgs[1].error_threshold_global), LIQ=$(best_lbfgs[1].fator_liq), ULF=$(best_lbfgs[1].ultra_low_factor)")
         println("     Teste normalizado: $(round(best_lbfgs[2].avg_test_cost_normalized, digits=6))")
         println("     Overfitting: $(round(best_lbfgs[2].overfitting_ratio, digits=2))")
         println("     Estabilidade: $(round(best_lbfgs[2].avg_vertex_stability, digits=1)) bp/dia")
@@ -979,8 +929,8 @@ end
 
 function main()
     println("🚀 Iniciando walk-forward contínuo...")
-    config = TOML.parsefile("config.toml")
-    cv_config = get(config, "cross_validation", Dict())
+    config_service = PQRateCurve.default_config()
+    cv_config = PQRateCurve.get_cv_config(config_service)
     results, elapsed_time, num_configs = run_continuous_walkforward()
 
     analyze_continuous_results(results, cv_config)
@@ -1025,12 +975,13 @@ function main()
                 "f_calls_limit" => best_params.f_calls_limit
             ),
             "optimization" => Dict{String, Any}(
-                "use_lm" => best_params.use_lbfgs,
+                "use_lbfgs" => best_params.use_lbfgs,
                 "temporal_penalty_weight" => best_params.temporal_penalty_weight
             ),
             "outlier_detection" => Dict{String, Any}(
-                "mad_threshold" => best_params.mad_threshold,
-                "fator_liq" => best_params.fator_liq
+                "error_threshold_global" => best_params.error_threshold_global,
+                "fator_liq" => best_params.fator_liq,
+                "ultra_low_factor" => best_params.ultra_low_factor
             )
         )
         

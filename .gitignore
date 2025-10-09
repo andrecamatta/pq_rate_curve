@@ -1,6 +1,5 @@
 # Arquivos específicos do VSCode
 .vscode/
-.github/
 
 # Claude files
 .claude/
@@ -8,3 +7,13 @@
 # Output files
 *.csv
 *.mp4
+*.log
+outputs/
+tests/*.csv
+tests/*.mp4
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store

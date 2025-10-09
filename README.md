@@ -1,13 +1,15 @@
 # PQ Rate Curve
 
-Sistema de ajuste de curvas de juros Nelson-Siegel-Svensson (NSS) para títulos públicos brasileiros usando otimização PSO (Particle Swarm Optimization) com refinamento L-BFGS.
+**Módulo Julia** para ajuste de curvas de juros Nelson-Siegel-Svensson (NSS) em títulos públicos brasileiros usando otimização PSO (Particle Swarm Optimization) com refinamento L-BFGS.
+
+> 💡 **Novidade:** Agora disponível como módulo Julia completo! Use `using PQRateCurve` para acessar todas as funções via API ou execute os scripts CLI para processamento em lote.
 
 ## Objetivos
 
 Este projeto implementa um sistema robusto para:
 
 1. **Estimação de curvas de juros** usando o modelo Nelson-Siegel-Svensson
-2. **Remoção automática de outliers** baseada em MAD (Median Absolute Deviation) e critérios de liquidez
+2. **Remoção automática de outliers** baseada em threshold fixo de erro e filtro de ultra-baixa liquidez
 3. **Otimização híbrida** PSO + L-BFGS para ajuste de parâmetros
 4. **Validação cruzada walk-forward** com continuidade temporal
 5. **Análise de performance** através de múltiplos regimes econômicos
@@ -19,26 +21,177 @@ O sistema processa dados do BACEN (Banco Central do Brasil) e do Tesouro Direto 
 ```
 ├── src/
 │   ├── PQRateCurve.jl           # Módulo principal
+│   ├── config_service.jl        # Gerenciamento centralizado de configurações
+│   ├── constants.jl             # Constantes do projeto
+│   ├── formatting.jl            # Funções de formatação (números, percentuais, etc.)
 │   ├── financial_math.jl        # Funções matemáticas financeiras
 │   ├── data_handling.jl         # Manipulação de dados BACEN
-│   ├── outlier_detection.jl     # Detecção de outliers MAD + liquidez
-│   └── estimation.jl            # Otimização PSO + L-BFGS
+│   ├── outlier_detection.jl     # Detecção de outliers (threshold fixo + liquidez)
+│   ├── estimation.jl            # Otimização PSO + L-BFGS
+│   └── high_level_api.jl        # API de alto nível (fit_curves_for_period, etc.)
+├── tests/
+│   ├── test_refactoring.jl      # Testes de refatoração
+│   ├── test_multiple_dates.jl   # Testes com múltiplas datas
+│   └── test_high_level_api.jl   # Testes da API de alto nível
+├── examples/
+│   └── basic_usage.jl           # Exemplo de uso do módulo
+├── outputs/                     # Saídas (CSVs, vídeos) - gitignored
 ├── config.toml                  # Configuração padrão
 ├── optimal_config.toml          # Configuração otimizada (gerada)
-├── fit_curvas.jl               # Script para ajuste de curvas
+├── fit_curvas.jl                # Script para ajuste de curvas
 ├── run_continuous_walkforward_cv.jl # Validação de hiperparâmetros
-├── create_yield_curve_animation.jl # Animação das curvas
-└── raw/                        # Dados BACEN (zips)
+├── create_yield_curve_animation.jl  # Animação das curvas
+├── USO_DO_MODULO.md             # Guia completo de uso como módulo
+└── raw/                         # Dados BACEN (zips)
 ```
 
-## Como Usar
+## Instalação e Setup
+
+```julia
+# Clone o repositório
+cd ~/Projetos
+git clone <url-do-repo>
+cd pq_rate_curve
+
+# Ative o projeto e instale dependências
+using Pkg
+Pkg.activate(".")
+Pkg.instantiate()
+```
+
+## Uso como Módulo Julia
+
+Este projeto é um **módulo Julia completo** que pode ser usado de duas formas:
+
+### 1. Uso Programático (API)
+
+#### Funções de Alto Nível (Recomendadas)
+
+As funções de alto nível encapsulam workflows completos e são a forma **mais fácil** de usar o módulo:
+
+```julia
+using PQRateCurve
+using Dates
+
+# Ajustar curvas NSS para um período
+results, config = fit_curves_for_period(
+    Date(2024, 1, 1),
+    Date(2024, 3, 31);
+    output_csv="curvas_q1",    # Salva automaticamente
+    find_continuity=true,       # Busca parâmetros anteriores
+    verbose=true                # Mostra progresso
+)
+
+# Analisar resultados
+for r in results
+    if r.success
+        println("$(r.date): β₀=$(round(r.params[1], digits=4)), custo=$(round(r.cost, digits=6))")
+    end
+end
+
+# Criar animação das curvas
+video = create_yield_curve_animation(
+    "curvas_q1_2024-01-01_12-00-00.csv",
+    "animacao_q1.mp4";
+    fps=15,
+    duration=20
+)
+```
+
+**📖 Ver documentação completa de alto nível:** [`USO_DO_MODULO.md`](USO_DO_MODULO.md#funções-de-alto-nível-recomendadas)
+
+**🎓 Ver exemplo completo:** [`examples/high_level_usage.jl`](examples/high_level_usage.jl)
+
+#### Funções de Baixo Nível
+
+Para controle fino ou uso customizado:
+
+```julia
+using PQRateCurve
+using Dates
+
+# Calcular taxas NSS para diferentes prazos
+params = [0.10, -0.02, -0.01, 0.005, 5.0, 15.0]  # β0, β1, β2, β3, τ1, τ2
+taxa_1y = nss_rate(1.0, params)   # Taxa para 1 ano
+taxa_5y = nss_rate(5.0, params)   # Taxa para 5 anos
+
+# Precificar um título LTN
+ref_date = Date(2024, 1, 15)
+maturity_date = Date(2025, 1, 15)
+cash_flow = [(maturity_date, 1000.0)]
+preco = price_bond(cash_flow, ref_date, params)
+
+# Calcular duration
+duration = calculate_duration(cash_flow, ref_date, params)
+
+# Carregar dados do BACEN e otimizar
+df = load_bacen_data(ref_date, ref_date)
+cash_flows, quantities, info = generate_cash_flows_with_quantity(df, ref_date)
+
+# Otimização completa com remoção de outliers
+config = load_configuration("config.toml")
+params_otimos, custo, flows_limpos, outliers, iters =
+    optimize_nelson_siegel_svensson_with_mad_outlier_removal(
+        cash_flows, ref_date,
+        config["pso"]["lower_bounds"],
+        config["pso"]["upper_bounds"];
+        bond_quantities=quantities,
+        pso_N=config["pso"]["N"]
+    )
+```
+
+**🎓 Ver exemplo de baixo nível:** [`examples/basic_usage.jl`](examples/basic_usage.jl)
+
+#### Principais Funções Exportadas
+
+**Alto Nível:**
+- `fit_curves_for_period(start, end; options...)` - Ajusta curvas para período
+- `create_yield_curve_animation(csv, video; options...)` - Cria animação
+
+> **Nota:** Validação de hiperparâmetros é feita via script CLI `run_continuous_walkforward_cv.jl` (processamento paralelo distribuído - ver seção Scripts CLI abaixo)
+
+**Matemática Financeira:**
+- `nss_rate(t, params)` - Taxa NSS para prazo t
+- `price_bond(cash_flow, ref_date, params)` - Precificação de títulos
+- `calculate_duration(...)` - Cálculo de duration
+- `calculate_ytm(...)` - Yield to maturity
+
+**Manipulação de Dados:**
+- `load_bacen_data(start_date, end_date)` - Carregar dados BACEN
+- `generate_cash_flows_with_quantity(...)` - Gerar cash flows
+- `load_configuration(file)` - Carregar config TOML (legacy)
+
+**Gerenciamento de Configurações (ConfigService):**
+- `load_config(file)` - Carregar configuração com validação
+- `get_cv_config(service)` - Obter configurações de cross-validation
+- `get_pso_config(service)` - Obter configurações PSO
+- `get_pso_bounds(config)` - Obter bounds PSO (single source of truth)
+
+**Funções de Formatação:**
+- `format_percentage(x)` - Formatar como porcentagem
+- `format_score(x)` - Formatar scores/custos
+- `format_nss_params(params)` - Formatar parâmetros NSS
+- `format_currency(x)` - Formatar valores monetários
+- Mais 10 funções de formatação especializadas
+
+**Otimização:**
+- `optimize_nelson_siegel_svensson_with_mad_outlier_removal(...)` - Otimização completa
+- `detect_outliers_mad_and_liquidity(...)` - Detecção de outliers
+- `refine_nss_with_lbfgs(...)` - Refinamento L-BFGS
+- `normalize_cost_by_volume(dates, costs)` - Normalização de custos por volume
+
+### 2. Scripts de Linha de Comando
+
+Os scripts principais (`fit_curvas.jl`, `run_continuous_walkforward_cv.jl`, etc.) usam o módulo internamente e podem ser executados diretamente:
+
+## Como Usar (Scripts CLI)
 
 ### 1. Validação de Hiperparâmetros
 
 Para estabelecer os hiperparâmetros ótimos através de validação cruzada walk-forward:
 
 ```bash
-julia run_continuous_walkforward_cv.jl
+julia --project=. run_continuous_walkforward_cv.jl
 ```
 
 **O que faz:**
@@ -54,18 +207,19 @@ num_hyperparameter_configs = 20  # Número de configurações testadas
 
 [pso]
 N = 80                    # Número de partículas
-C1 = 1.8                  # Aceleração cognitiva
-C2 = 1.3                  # Aceleração social
-omega = 0.45              # Peso de inércia
+C1 = 2.92                 # Aceleração cognitiva
+C2 = 1.68                 # Aceleração social
+omega = 0.57              # Peso de inércia
 f_calls_limit = 1500      # Limite de avaliações
 
 [optimization]
 use_lbfgs = true          # Usar refinamento L-BFGS
-temporal_penalty_weight = 0.01  # Penalidade de continuidade temporal
+temporal_penalty_weight = 0.1978  # Penalidade de continuidade temporal
 
 [outlier_detection]
-mad_threshold = 12.0      # Threshold MAD (sigma)
-fator_liq = 0.015         # Fator de liquidez (1.5% do volume)
+error_threshold_global = 27.67    # Threshold fixo de erro (R$)
+ultra_low_factor = 4.96           # Fator de ultra-baixa liquidez
+fator_liq = 0.0111                # Fator de liquidez (1.11% do volume)
 ```
 
 ### 2. Ajuste de Curvas para Intervalo de Datas
@@ -73,12 +227,12 @@ fator_liq = 0.015         # Fator de liquidez (1.5% do volume)
 Para ajustar curvas NSS em um período específico:
 
 ```bash
-julia fit_curvas.jl --start 2024-01-01 --end 2024-12-31
+julia --project=. fit_curvas.jl --start 2024-01-01 --end 2024-12-31
 ```
 
 **Opções disponíveis:**
 ```bash
-julia fit_curvas.jl --start YYYY-MM-DD --end YYYY-MM-DD [opções]
+julia --project=. fit_curvas.jl --start YYYY-MM-DD --end YYYY-MM-DD [opções]
 
 --start          Data inicial (YYYY-MM-DD) [padrão: 2024-01-01]
 --end            Data final (YYYY-MM-DD) [padrão: 2024-12-31]  
@@ -91,13 +245,13 @@ julia fit_curvas.jl --start YYYY-MM-DD --end YYYY-MM-DD [opções]
 **Exemplos:**
 ```bash
 # Ajustar todo o ano de 2024
-julia fit_curvas.jl --start 2024-01-01 --end 2024-12-31
+julia --project=. fit_curvas.jl --start 2024-01-01 --end 2024-12-31
 
 # Apenas primeiro trimestre de 2024
-julia fit_curvas.jl --start 2024-01-01 --end 2024-03-31
+julia --project=. fit_curvas.jl --start 2024-01-01 --end 2024-03-31
 
 # Teste de configuração sem executar
-julia fit_curvas.jl --start 2024-01-01 --end 2024-01-31 --dry-run
+julia --project=. fit_curvas.jl --start 2024-01-01 --end 2024-01-31 --dry-run
 ```
 
 **O que faz:**
@@ -118,7 +272,7 @@ Data,Sucesso,Beta0,Beta1,Beta2,Beta3,Tau1,Tau2,Custo,NumTitulos,OutliersRemovido
 Para criar uma animação das curvas de juros ao longo do tempo:
 
 ```bash
-julia create_yield_curve_animation.jl curvas_nss_2024-01-01_12-00-00.csv [output_video.mp4]
+julia --project=. create_yield_curve_animation.jl curvas_nss_2024-01-01_12-00-00.csv [output_video.mp4]
 ```
 
 **Parâmetros:**
@@ -154,9 +308,10 @@ r(τ) = β₀ + β₁[(1-e^(-τ/τ₁))/(τ/τ₁)] + β₂[((1-e^(-τ/τ₁))/(
 
 ### Detecção de Outliers
 
-- **MAD (Median Absolute Deviation)**: Remove títulos com preços anômalos
-- **Critério de liquidez**: Remove títulos com baixo volume negociado
-- **Critérios simultâneos**: Outlier apenas se AMBAS condições são verdadeiras
+- **Threshold Fixo de Erro**: Remove títulos com erro de precificação acima de threshold configurável (ex: 20 R$)
+- **Filtro de Ultra-Baixa Liquidez**: Remove títulos com volume extremamente baixo (< factor × mediana)
+- **Critérios independentes**: Títulos são removidos se satisfizerem qualquer um dos critérios
+- **Configuração flexível**: Parâmetros `error_threshold_global` e `ultra_low_factor` ajustáveis via config.toml
 
 ### Validação Cruzada
 
@@ -166,14 +321,22 @@ r(τ) = β₀ + β₁[(1-e^(-τ/τ₁))/(τ/τ₁)] + β₂[((1-e^(-τ/τ₁))/(
 
 ## Requisitos
 
-### Julia (versão 1.6+)
+### Julia (versão 1.11+)
 
-Pacotes necessários (ver `Project.toml`):
+Este é um **módulo Julia completo**. Todas as dependências estão declaradas em `Project.toml`:
 ```julia
-using CSV, DataFrames, Dates, HTTP, ZipFile
-using Optim, Metaheuristics, Hyperopt
-using Plots, Statistics, LinearAlgebra
-using TOML, JSON, BusinessDays
+# Principais dependências
+CSV, DataFrames, Dates, HTTP, ZipFile
+Optim, Metaheuristics, Hyperopt
+Plots, Statistics, LinearAlgebra
+TOML, JSON, BusinessDays
+```
+
+**Instalação das dependências:**
+```julia
+using Pkg
+Pkg.activate(".")
+Pkg.instantiate()  # Instala todas as dependências do Project.toml
 ```
 
 ### Dados
@@ -182,23 +345,64 @@ O sistema baixa automaticamente dados do BACEN quando necessário, mas você pod
 
 ## Exemplo de Fluxo Completo
 
+### Usando Scripts CLI
+
 ```bash
 # 1. Validar hiperparâmetros (uma vez)
-julia run_continuous_walkforward_cv.jl
+julia --project=. run_continuous_walkforward_cv.jl
 
 # 2. Ajustar curvas para 2024
-julia fit_curvas.jl --start 2024-01-01 --end 2024-12-31
+julia --project=. fit_curvas.jl --start 2024-01-01 --end 2024-12-31
 
 # 3. Criar animação
-julia create_yield_curve_animation.jl curvas_nss_2024-01-01_12-00-00.csv animacao_2024.mp4
+julia --project=. create_yield_curve_animation.jl curvas_nss_2024-01-01_12-00-00.csv animacao_2024.mp4
+```
+
+### Usando o Módulo Programaticamente
+
+```julia
+using PQRateCurve
+
+# Exemplo rápido: calcular taxa para 1 ano
+params = [0.10, -0.02, -0.01, 0.005, 5.0, 15.0]
+taxa = nss_rate(1.0, params)
+println("Taxa 1 ano: $(round(taxa*100, digits=2))%")
+
+# Ver examples/basic_usage.jl para exemplo completo
 ```
 
 ## Performance
 
 **Benchmarks típicos:**
 - Validação completa (20 configs): ~15-25 minutos
-- Ajuste anual (250 dias): ~8-12 minutos  
+- Ajuste anual (250 dias): ~8-12 minutos
 - Animação: ~30-60 segundos
+
+## Testes
+
+O projeto inclui uma suíte completa de testes localizada em `tests/`:
+
+```bash
+# Executar teste básico de refatoração
+julia --project=. tests/test_refactoring.jl
+
+# Executar teste com múltiplas datas
+julia --project=. tests/test_multiple_dates.jl
+
+# Executar teste da API de alto nível
+julia --project=. tests/test_high_level_api.jl
+```
+
+**Cobertura dos testes:**
+- ✅ Funções de formatação (14 funções)
+- ✅ Fit de curva NSS (PSO + L-BFGS)
+- ✅ Detecção de outliers
+- ✅ Continuidade temporal
+- ✅ Normalização de custos
+- ✅ API de alto nível
+- ✅ Integração completa
+
+Ver `tests/TESTE_REFATORACAO_RESUMO.md` para relatório detalhado dos testes.
 
 ## Referências
 
