@@ -256,7 +256,7 @@ julia --project=. fit_curvas.jl --start 2024-01-01 --end 2024-01-31 --dry-run
 
 **O que faz:**
 - Carrega dados BACEN para cada data útil no período
-- Aplica detecção de outliers (MAD + liquidez)
+- Aplica detecção de outliers (threshold fixo + filtro de ultra-baixa liquidez)
 - Otimiza parâmetros NSS usando PSO + L-BFGS (se configurado)
 - Mantém continuidade temporal usando parâmetros do dia anterior
 - Gera arquivo CSV com resultados: `curvas_nss_YYYY-MM-DD_HH-MM-SS.csv`
@@ -401,8 +401,6 @@ julia --project=. tests/test_high_level_api.jl
 - ✅ Normalização de custos
 - ✅ API de alto nível
 - ✅ Integração completa
-
-Ver `tests/TESTE_REFATORACAO_RESUMO.md` para relatório detalhado dos testes.
 
 ## Referências
 
