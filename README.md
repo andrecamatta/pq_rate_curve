@@ -13,6 +13,8 @@ Este projeto implementa um sistema robusto para:
 3. **Otimização híbrida** PSO + L-BFGS para ajuste de parâmetros
 4. **Validação cruzada walk-forward** com continuidade temporal
 5. **Análise de performance** através de múltiplos regimes econômicos
+6. **📊 Banco de dados histórico SQLite** com ~10 anos de curvas (2015-2025)
+7. **🎯 API de consulta de taxas** com multiple dispatch para diferentes cenários
 
 O sistema processa dados do BACEN (Banco Central do Brasil) e do Tesouro Direto para gerar curvas de juros precisas e estáveis.
 
@@ -28,6 +30,7 @@ O sistema processa dados do BACEN (Banco Central do Brasil) e do Tesouro Direto 
 │   ├── data_handling.jl         # Manipulação de dados BACEN
 │   ├── outlier_detection.jl     # Detecção de outliers (threshold fixo + liquidez)
 │   ├── estimation.jl            # Otimização PSO + L-BFGS
+│   ├── persistence.jl           # 📊 Persistência SQLite (NOVO!)
 │   └── high_level_api.jl        # API de alto nível (fit_curves_for_period, etc.)
 ├── tests/
 │   ├── test_refactoring.jl      # Testes de refatoração
@@ -35,12 +38,20 @@ O sistema processa dados do BACEN (Banco Central do Brasil) e do Tesouro Direto 
 │   └── test_high_level_api.jl   # Testes da API de alto nível
 ├── examples/
 │   └── basic_usage.jl           # Exemplo de uso do módulo
+├── analysis/                    # 🔍 Scripts de análise (NOVO!)
+│   ├── analyze_high_cost_days.jl      # Análise de dias problemáticos
+│   ├── analyze_min_bonds_impact.jl    # Impacto de min_bonds_for_fit
+│   └── compare_problematic_day.jl     # Comparação de descontinuidades
 ├── outputs/                     # Saídas (CSVs, vídeos) - gitignored
 ├── config.toml                  # Configuração padrão
 ├── optimal_config.toml          # Configuração otimizada (gerada)
+├── historical_curves.db         # 📊 Banco SQLite com curvas (NOVO!)
 ├── fit_curvas.jl                # Script para ajuste de curvas
+├── build_historical_curves.jl   # 📊 Construir banco histórico (NOVO!)
 ├── run_continuous_walkforward_cv.jl # Validação de hiperparâmetros
-├── create_yield_curve_animation.jl  # Animação das curvas
+├── create_yield_curve_animation.jl  # Animação das curvas (CSV)
+├── create_animation_from_db.jl      # 🎬 Animação do banco (rápida) (NOVO!)
+├── create_animation_from_db_full.jl # 🎬 Animação completa 1:1 (NOVO!)
 ├── USO_DO_MODULO.md             # Guia completo de uso como módulo
 └── raw/                         # Dados BACEN (zips)
 ```
@@ -148,6 +159,16 @@ params_otimos, custo, flows_limpos, outliers, iters =
 - `fit_curves_for_period(start, end; options...)` - Ajusta curvas para período
 - `create_yield_curve_animation(csv, video; options...)` - Cria animação
 
+**📊 Persistência (NOVO!):**
+- `init_database(path)` - Inicializa banco SQLite
+- `save_curve(db, date, params, cost, ...)` - Salva curva no banco
+- `load_curve(db, date)` - Carrega curva específica
+- `load_curves(db, start_date, end_date)` - Carrega intervalo
+- `curve_exists(db, date)` - Verifica se curva existe
+- `get_database_stats(db)` - Estatísticas do banco
+- `get_missing_dates(db, start, end)` - Identifica datas faltantes
+- `get_rate(db, date, maturity)` - 🎯 Consulta taxa (multiple dispatch - 4 métodos!)
+
 > **Nota:** Validação de hiperparâmetros é feita via script CLI `run_continuous_walkforward_cv.jl` (processamento paralelo distribuído - ver seção Scripts CLI abaixo)
 
 **Matemática Financeira:**
@@ -179,6 +200,63 @@ params_otimos, custo, flows_limpos, outliers, iters =
 - `detect_outliers_mad_and_liquidity(...)` - Detecção de outliers
 - `refine_nss_with_lbfgs(...)` - Refinamento L-BFGS
 - `normalize_cost_by_volume(dates, costs)` - Normalização de custos por volume
+
+### 📊 Banco de Dados SQLite e API de Consulta (NOVO!)
+
+O sistema agora inclui persistência em banco de dados SQLite para armazenamento e consulta eficiente de curvas históricas:
+
+```julia
+using PQRateCurve, Dates
+
+# 1. Inicializar/abrir banco
+db = init_database("historical_curves.db")
+
+# 2. Construir banco histórico (uma vez)
+# Via script: julia --project=. build_historical_curves.jl
+# Ou programaticamente com fit_curves_for_period(...; db_path="historical_curves.db")
+
+# 3. Consultar taxa para uma data e prazo específicos
+rate_1y = get_rate(db, Date(2024, 6, 14), 1.0)  # DI 1 ano
+println("DI 1 ano: $(round(rate_1y * 100, digits=2))%")
+
+# 4. Múltiplas maturidades em uma data
+maturities = [0.5, 1.0, 2.0, 5.0, 10.0]
+rates = get_rate(db, Date(2024, 6, 14), maturities)
+
+# 5. Série temporal de um prazo
+df_series = get_rate(db, Date(2024, 6, 1), Date(2024, 6, 30), 1.0)
+println("Série DI 1 ano: $(nrow(df_series)) dias")
+
+# 6. Datas específicas
+dates = [Date(2024, 1, 2), Date(2024, 4, 1), Date(2024, 7, 1)]
+df_rates = get_rate(db, dates, 5.0)  # DI 5 anos
+
+# 7. Estatísticas do banco
+stats = get_database_stats(db)
+println("Curvas: $(stats.total_curves), Sucesso: $(stats.success_rate)%")
+```
+
+**🎯 4 métodos de `get_rate()` via multiple dispatch:**
+1. `get_rate(db, date, maturity)` → `Float64` - Uma taxa
+2. `get_rate(db, date, maturities::Vector)` → `Vector{Float64}` - Estrutura a termo
+3. `get_rate(db, start_date, end_date, maturity)` → `DataFrame` - Série temporal
+4. `get_rate(db, dates::Vector, maturity)` → `DataFrame` - Datas específicas
+
+**Modo Incremental:**
+```julia
+# Primeira execução: processa tudo
+results, config = fit_curves_for_period(
+    Date(2015, 1, 1), Date(2025, 12, 31);
+    db_path="historical_curves.db"  # Ativa modo banco de dados
+)
+
+# Execuções seguintes: apenas datas novas
+# (carrega existentes do banco automaticamente)
+results, config = fit_curves_for_period(
+    Date(2015, 1, 1), Date(2025, 12, 31);
+    db_path="historical_curves.db"  # Incremental!
+)
+```
 
 ### 2. Scripts de Linha de Comando
 
@@ -267,28 +345,51 @@ Data,Sucesso,Beta0,Beta1,Beta2,Beta3,Tau1,Tau2,Custo,NumTitulos,OutliersRemovido
 2024-01-02,true,0.1234,0.0567,-0.0123,0.0089,1.5432,3.2156,0.0045,15,2,false,false,
 ```
 
-### 3. Criação de Animação das Curvas
+### 3. Construção de Banco Histórico (NOVO!)
 
-Para criar uma animação das curvas de juros ao longo do tempo:
+Para construir um banco de dados com todas as curvas históricas (2015-2025):
 
+```bash
+julia --project=. build_historical_curves.jl
+```
+
+**O que faz:**
+- Processa todos os dias úteis de fev/2015 a set/2025 (~2,700+ dias)
+- Salva em `historical_curves.db` (SQLite)
+- Modo incremental: execuções subsequentes processam apenas datas novas
+- Estimativa: ~90 minutos na primeira execução
+
+**Resultado:**
+```
+📊 Banco de dados: historical_curves.db
+✅ Curvas bem-sucedidas: ~2,675 (96.2%)
+📅 Período: 2015-02-02 → 2025-09-30
+💾 Tamanho: ~500 KB
+```
+
+### 4. Criação de Animação das Curvas
+
+**Opção 1: De arquivo CSV**
 ```bash
 julia --project=. create_yield_curve_animation.jl curvas_nss_2024-01-01_12-00-00.csv [output_video.mp4]
 ```
 
-**Parâmetros:**
-- `curvas_nss_*.csv`: Arquivo CSV com os parâmetros NSS
-- `output_video.mp4` (opcional): Nome do vídeo (padrão: timestamp automático)
+**Opção 2: Do banco de dados (rápida - 30s)**
+```bash
+julia --project=. create_animation_from_db.jl
+```
+Gera `historical_curves_animation.mp4` com 300 frames interpolados.
 
-**O que faz:**
-- Lê parâmetros NSS do arquivo CSV
-- Gera curvas de juros para prazos de 0.25 a 10 anos
-- Cria animação mostrando evolução temporal das curvas
-- Salva vídeo MP4 com 30 segundos de duração (10 FPS)
+**Opção 3: Do banco de dados (completa - 1 frame por curva, ~3min)**
+```bash
+julia --project=. create_animation_from_db_full.jl
+```
+Gera `historical_curves_animation_FULL.mp4` com 2,675 frames (um por cada curva bem-sucedida).
 
 **Configuração da animação:**
 ```julia
-const FPS = 10        # frames por segundo
-const DURATION = 30   # duração em segundos
+fps = 15              # frames por segundo
+duration = 179        # duração em segundos (para versão completa)
 ```
 
 ## Metodologia Técnica

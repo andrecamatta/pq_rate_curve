@@ -271,6 +271,56 @@ missing = get_missing_dates(db, Date(2024, 1, 1), Date(2024, 12, 31))
 println("Faltam processar: $(length(missing)) dias")
 ```
 
+#### Consultar Taxas Diretamente (get_rate)
+
+A função `get_rate` usa **multiple dispatch** do Julia para consultar taxas diretamente do banco, sem reprocessar. Quatro métodos disponíveis:
+
+```julia
+db = init_database("historical_curves.db")
+
+# Método 1: Uma data, um prazo → Float64 ou nothing
+rate = get_rate(db, Date(2024, 6, 15), 1.0)  # DI 1 ano
+
+if rate !== nothing
+    println("DI 1Y: $(round(rate * 100, digits=2))%")
+end
+
+# Método 2: Uma data, múltiplos prazos → Vector
+rates = get_rate(db, Date(2024, 6, 15), [0.5, 1.0, 2.0, 5.0, 10.0])
+println("Estrutura a termo completa:")
+for (maturity, r) in zip([0.5, 1.0, 2.0, 5.0, 10.0], rates)
+    if r !== nothing
+        println("  $(maturity)Y: $(round(r * 100, digits=2))%")
+    end
+end
+
+# Método 3: Range de datas, um prazo → DataFrame
+series = get_rate(db, Date(2024, 1, 1), Date(2024, 12, 31), 1.0)
+
+# Remover datas com dados faltantes
+using DataFrames
+valid_series = dropmissing(series)
+
+# Plotar evolução temporal
+using Plots
+plot(valid_series.date, valid_series.rate .* 100,
+     xlabel="Data", ylabel="Taxa (%)",
+     title="DI 1 ano - Evolução 2024",
+     legend=false, lw=2)
+
+# Método 4: Vetor de datas específicas, um prazo → DataFrame
+dates = [Date(2024, 1, 2), Date(2024, 4, 1), Date(2024, 7, 1), Date(2024, 10, 1)]
+quarterly = get_rate(db, dates, 5.0)  # DI 5 anos trimestral
+
+println(quarterly)
+```
+
+**Vantagens do `get_rate`:**
+- ✅ **Acesso instantâneo**: Consulta direta ao cache, sem reprocessar
+- ✅ **Flexível**: Um ou múltiplos prazos/datas com a mesma função
+- ✅ **Type-safe**: Retorna `nothing`/`missing` quando dado não disponível
+- ✅ **DataFrame-ready**: Resultados prontos para análise e plotagem
+
 ### Exemplo: Construir Base Histórica Completa
 
 ```julia

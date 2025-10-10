@@ -30,7 +30,7 @@ force_redownload = false
 
 [fit_curves]
 continuity_search_days = 30
-min_bonds_for_fit = 3
+min_bonds_for_fit = 6  # Igual ao número de parâmetros NSS (β₀, β₁, β₂, β₃, τ₁, τ₂)
 lbfgs_max_iterations = 50
 
 [animation]

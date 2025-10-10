@@ -217,6 +217,12 @@ function _fit_nss_single_day(date::Date, config::Dict{String, Any}, previous_par
             verbose=false
         )
 
+        # CRITICAL: Verify we still have enough bonds AFTER outlier removal
+        if length(final_cash_flows) < config["min_bonds_for_fit"]
+            return DayResult(date, false, nothing, nothing, length(cash_flows), outliers_removed,
+                           "Títulos insuficientes após remover outliers: $(length(final_cash_flows)) < $(config["min_bonds_for_fit"])", false)
+        end
+
         # L-BFGS refinement if configured
         if config["use_lbfgs"]
             try
@@ -561,9 +567,9 @@ function fit_curves_for_period(start_date::Date, end_date::Date;
         end
 
         # Calculate overall statistics
-        total_successful = sum(r.success for r in all_results)
+        total_successful = sum(r.success for r in all_results; init=0)
         total_dates_overall = length(all_results)
-        continuity_count = sum(r.used_previous_params for r in all_results if r.success)
+        continuity_count = sum(r.used_previous_params for r in all_results if r.success; init=0)
 
         if db !== nothing
             println("\n📊 ESTATÍSTICAS FINAIS (banco de dados):")

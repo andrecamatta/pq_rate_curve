@@ -256,27 +256,27 @@ function load_curve(db::SQLite.DB, date::Date)
         SELECT * FROM nss_curves WHERE date = ?
     """, [date_str])
 
-    rows = collect(result)
+    df = DataFrame(result)
 
-    if isempty(rows)
+    if isempty(df)
         return nothing
     end
 
-    row = first(rows)
+    row = df[1, :]
 
-    success_bool = row.success !== missing && row.success == 1
-    date_value = row.date !== missing ? (typeof(row.date) == String ? Date(row.date) : Date(row.date)) : nothing
+    success_bool = !ismissing(row.success) && row.success == 1
+    date_value = !ismissing(row.date) ? Date(row.date) : nothing
 
     return (
         date = date_value,
         params = success_bool ? [row.beta0, row.beta1, row.beta2, row.beta3, row.tau1, row.tau2] : nothing,
         cost = success_bool ? row.cost : nothing,
-        n_bonds = row.n_bonds !== missing ? row.n_bonds : 0,
-        outliers_removed = row.outliers_removed !== missing ? row.outliers_removed : 0,
+        n_bonds = !ismissing(row.n_bonds) ? row.n_bonds : 0,
+        outliers_removed = !ismissing(row.outliers_removed) ? row.outliers_removed : 0,
         success = success_bool,
-        error_message = row.error_message !== missing ? row.error_message : nothing,
-        used_previous_params = row.used_previous_params !== missing && row.used_previous_params == 1,
-        reoptimized = row.reoptimized !== missing && row.reoptimized == 1,
+        error_message = !ismissing(row.error_message) ? row.error_message : nothing,
+        used_previous_params = !ismissing(row.used_previous_params) && row.used_previous_params == 1,
+        reoptimized = !ismissing(row.reoptimized) && row.reoptimized == 1,
         created_at = row.created_at,
         updated_at = row.updated_at
     )
@@ -301,8 +301,11 @@ function curve_exists(db::SQLite.DB, date::Date)
         SELECT COUNT(*) as count FROM nss_curves WHERE date = ?
     """, [date_str])
 
-    row = first(collect(result))
-    return row.count > 0
+    for row in result
+        return row.count > 0
+    end
+
+    return false
 end
 
 """
@@ -375,8 +378,10 @@ println("Taxa de sucesso: \$(stats.success_rate)%")
 function get_database_stats(db::SQLite.DB)
     # Total
     result = DBInterface.execute(db, "SELECT COUNT(*) as count FROM nss_curves")
-    total_value = first(collect(result)).count
-    total = total_value !== missing ? total_value : 0
+    total = 0
+    for row in result
+        total = !ismissing(row.count) ? row.count : 0
+    end
 
     if total == 0
         return (
@@ -390,13 +395,19 @@ function get_database_stats(db::SQLite.DB)
 
     # Sucessos
     result = DBInterface.execute(db, "SELECT COUNT(*) as count FROM nss_curves WHERE success = 1")
-    successful = first(collect(result)).count
+    successful = 0
+    for row in result
+        successful = !ismissing(row.count) ? row.count : 0
+    end
 
     # Range de datas
     result = DBInterface.execute(db, "SELECT MIN(date) as min_date, MAX(date) as max_date FROM nss_curves")
-    row = first(collect(result))
-    min_date = row.min_date !== missing ? Date(row.min_date) : nothing
-    max_date = row.max_date !== missing ? Date(row.max_date) : nothing
+    min_date = nothing
+    max_date = nothing
+    for row in result
+        min_date = !ismissing(row.min_date) ? Date(row.min_date) : nothing
+        max_date = !ismissing(row.max_date) ? Date(row.max_date) : nothing
+    end
 
     return (
         total_curves = total,
@@ -405,4 +416,174 @@ function get_database_stats(db::SQLite.DB)
         date_range = (min_date, max_date),
         success_rate = round(100 * successful / total, digits=1)
     )
+end
+
+# ============================================================================
+# Consulta de Taxas (múltiplos métodos via multiple dispatch)
+# ============================================================================
+
+"""
+    get_rate(db::SQLite.DB, date::Date, maturity::Real) -> Union{Float64, Nothing}
+
+Retorna taxa NSS para uma data e prazo específicos.
+
+# Argumentos
+- `db`: Conexão ao banco SQLite
+- `date`: Data de referência
+- `maturity`: Prazo em anos (ex: 0.5 para 6 meses, 1.0 para 1 ano)
+
+# Retorna
+- Taxa (Float64) se curva existir e for bem-sucedida
+- `nothing` se curva não existir ou falhou
+
+# Exemplo
+```julia
+db = init_database("historical_curves.db")
+
+# Taxa para 1 ano em 2024-06-15
+rate = get_rate(db, Date(2024, 6, 15), 1.0)  # → 0.1025 ou nothing
+
+if rate !== nothing
+    println("DI 1Y: \$(round(rate * 100, digits=2))%")
+end
+```
+"""
+function get_rate(db::SQLite.DB, date::Date, maturity::Real)
+    curve = load_curve(db, date)
+
+    if curve === nothing || !curve.success || curve.params === nothing
+        return nothing
+    end
+
+    return nss_rate(maturity, curve.params)
+end
+
+"""
+    get_rate(db::SQLite.DB, date::Date, maturities::Vector{<:Real}) -> Vector{Union{Float64, Nothing}}
+
+Retorna taxas NSS para múltiplos prazos em uma data específica.
+
+# Argumentos
+- `db`: Conexão ao banco SQLite
+- `date`: Data de referência
+- `maturities`: Vetor de prazos em anos
+
+# Retorna
+Vetor com taxas (ou `nothing` para cada prazo se curva não existir)
+
+# Exemplo
+```julia
+db = init_database("historical_curves.db")
+
+# Múltiplos prazos na mesma data
+rates = get_rate(db, Date(2024, 6, 15), [0.5, 1.0, 2.0, 5.0, 10.0])
+
+# rates = [0.0985, 0.1025, 0.1075, 0.1150, 0.1200] ou [nothing, ...]
+```
+"""
+function get_rate(db::SQLite.DB, date::Date, maturities::Vector{<:Real})
+    curve = load_curve(db, date)
+
+    if curve === nothing || !curve.success || curve.params === nothing
+        return fill(nothing, length(maturities))
+    end
+
+    return [nss_rate(m, curve.params) for m in maturities]
+end
+
+"""
+    get_rate(db::SQLite.DB, start_date::Date, end_date::Date, maturity::Real) -> DataFrame
+
+Retorna série temporal de taxas NSS para um prazo específico.
+
+# Argumentos
+- `db`: Conexão ao banco SQLite
+- `start_date`: Data inicial
+- `end_date`: Data final
+- `maturity`: Prazo em anos
+
+# Retorna
+DataFrame com colunas:
+- `date`: Data
+- `rate`: Taxa NSS (ou `missing` se não disponível)
+
+# Exemplo
+```julia
+db = init_database("historical_curves.db")
+
+# Série temporal: DI 1 ano ao longo de 2024
+series = get_rate(db, Date(2024, 1, 1), Date(2024, 12, 31), 1.0)
+
+# Filtrar apenas valores válidos
+valid_series = dropmissing(series)
+
+# Plotar
+using Plots
+plot(valid_series.date, valid_series.rate .* 100,
+     xlabel="Data", ylabel="Taxa (%)", title="DI 1 ano - 2024")
+```
+"""
+function get_rate(db::SQLite.DB, start_date::Date, end_date::Date, maturity::Real)
+    # Carrega todas as curvas do intervalo
+    curves_df = load_curves(db, start_date, end_date)
+
+    if isempty(curves_df)
+        return DataFrame(date=Date[], rate=Union{Float64,Missing}[])
+    end
+
+    # Calcula taxa para cada curva
+    rates = Vector{Union{Float64,Missing}}(undef, nrow(curves_df))
+
+    for (i, row) in enumerate(eachrow(curves_df))
+        if row.success == 1 && !ismissing(row.beta0)
+            params = [row.beta0, row.beta1, row.beta2, row.beta3, row.tau1, row.tau2]
+            rates[i] = nss_rate(maturity, params)
+        else
+            rates[i] = missing
+        end
+    end
+
+    return DataFrame(date=curves_df.date, rate=rates)
+end
+
+"""
+    get_rate(db::SQLite.DB, dates::Vector{Date}, maturity::Real) -> DataFrame
+
+Retorna taxas NSS para datas específicas e um prazo.
+
+# Argumentos
+- `db`: Conexão ao banco SQLite
+- `dates`: Vetor de datas
+- `maturity`: Prazo em anos
+
+# Retorna
+DataFrame com colunas:
+- `date`: Data
+- `rate`: Taxa NSS (ou `missing` se não disponível)
+
+# Exemplo
+```julia
+db = init_database("historical_curves.db")
+
+# Datas específicas
+dates = [Date(2024, 1, 2), Date(2024, 4, 1), Date(2024, 7, 1), Date(2024, 10, 1)]
+rates = get_rate(db, dates, 5.0)  # DI 5 anos
+
+println(rates)
+```
+"""
+function get_rate(db::SQLite.DB, dates::Vector{Date}, maturity::Real)
+    rates = Vector{Union{Float64,Missing}}(undef, length(dates))
+
+    for (i, date) in enumerate(dates)
+        curve = load_curve(db, date)
+
+        if curve !== nothing && curve.success && curve.params !== nothing
+            rates[i] = nss_rate(maturity, curve.params)
+        else
+            rates[i] = missing
+        end
+    end
+
+    return DataFrame(date=dates, rate=rates)
 end

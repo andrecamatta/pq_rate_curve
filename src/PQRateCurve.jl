@@ -57,7 +57,7 @@ export
     # Persistence (SQLite database)
     init_database, save_curve, save_curve_failure,
     load_curves, load_curve, curve_exists,
-    get_missing_dates, get_database_stats
+    get_missing_dates, get_database_stats, get_rate
 
 # Include all module files
 include("constants.jl")
