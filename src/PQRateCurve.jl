@@ -65,7 +65,10 @@ export
 
     # Curva com degraus nas datas de reunião (bootstrap)
     ZeroObservation, MeetingCurve, ltn_zero_rates, bootstrap_meeting_curve,
-    implied_path, zero_rate_curve
+    implied_path, zero_rate_curve,
+
+    # Curvas de referência da B3 (curva DI)
+    fetch_b3_curve, b3_curve_observations, B3_REFERENCE_CURVES
 
 # Include all module files
 include("constants.jl")
@@ -79,5 +82,6 @@ include("persistence.jl")
 include("high_level_api.jl")
 include("copom.jl")
 include("meeting_curve.jl")
+include("b3_curves.jl")
 
 end # module PQRateCurve
