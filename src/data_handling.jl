@@ -509,7 +509,10 @@ function load_cache_metadata()::Dict{String, CacheMetadata}
     !isfile(CACHE_METADATA_FILE) && return Dict{String, CacheMetadata}()
 
     try
-        data = JSON.parsefile(CACHE_METADATA_FILE)
+        # use_mmap=false: no Windows o mapeamento mantém um handle aberto no arquivo
+        # até o GC finalizá-lo, e o open(..., "w") de save_cache_metadata logo em
+        # seguida falha com EINVAL. Ler para String evita o lock.
+        data = JSON.parsefile(CACHE_METADATA_FILE; use_mmap=false)
         return Dict(k => CacheMetadata(v) for (k, v) in data)
     catch e
         @warn "Falha ao carregar metadados do cache: $e. Iniciando com cache vazio."
@@ -531,9 +534,14 @@ function save_cache_metadata(metadata::Dict{String, CacheMetadata})
 
     data = Dict(k => Dict(v) for (k, v) in metadata)
 
-    open(CACHE_METADATA_FILE, "w") do io
+    # Escrita atômica: grava em arquivo temporário e só então substitui o original.
+    # open(..., "w") trunca de imediato, então uma falha no meio da serialização
+    # deixaria os metadados vazios.
+    tmp_path = CACHE_METADATA_FILE * ".tmp"
+    open(tmp_path, "w") do io
         JSON.print(io, data, 2)  # Impressão formatada com indentação
     end
+    mv(tmp_path, CACHE_METADATA_FILE; force=true)
 end
 
 """
