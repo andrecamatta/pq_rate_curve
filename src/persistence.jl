@@ -327,15 +327,12 @@ println("Faltam processar: \$(length(missing)) dias")
 """
 function get_missing_dates(db::SQLite.DB, start_date::Date, end_date::Date;
                           only_business_days::Bool=true)
-    # Gera todas as datas do intervalo
-    all_dates = start_date:Day(1):end_date
-
-    # Filtra apenas dias úteis se solicitado
-    if only_business_days
-        all_dates = filter(d -> dayofweek(d) ∉ [6, 7], collect(all_dates))
-    else
-        all_dates = collect(all_dates)
-    end
+    # Gera todas as datas do intervalo.
+    # Usa o mesmo calendário de get_business_dates (BRSettlement): filtrar apenas
+    # fim de semana deixaria ~10 feriados por ano na lista de pendências, que
+    # nunca têm negociação e seriam reprocessados a cada execução.
+    all_dates = only_business_days ? get_business_dates(start_date, end_date) :
+                                     collect(start_date:Day(1):end_date)
 
     # Carrega datas existentes
     start_str = Dates.format(start_date, "yyyy-mm-dd")

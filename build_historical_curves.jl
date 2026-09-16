@@ -1,7 +1,11 @@
 #!/usr/bin/env julia
 """
 Script para construir base histórica completa de curvas NSS
-Período: Fevereiro/2015 → Setembro/2025
+
+Uso:
+    julia --project=. build_historical_curves.jl [start_date] [end_date]
+
+Padrão: 2015-02-01 → hoje. Datas no formato YYYY-MM-DD.
 """
 
 using PQRateCurve
@@ -13,8 +17,8 @@ println("=" ^ 70)
 
 # Configuração
 DB_PATH = "historical_curves.db"
-START_DATE = Date(2015, 2, 1)   # Primeira data viável (90% sucesso)
-END_DATE = Date(2025, 9, 30)    # Última data disponível
+START_DATE = length(ARGS) >= 1 ? Date(ARGS[1]) : Date(2015, 2, 1)  # Primeira data viável (90% sucesso)
+END_DATE = length(ARGS) >= 2 ? Date(ARGS[2]) : today()             # Até a última data disponível
 CONFIG_FILE = "config.toml"
 
 println("\n📋 Configuração:")
