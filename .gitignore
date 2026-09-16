@@ -6,6 +6,9 @@
 
 # Output files
 *.csv
+# ...mas raw/ guarda dado de origem, não saída gerada (os NegT*.CSV do BACEN
+# já são versionados por essa razão)
+!raw/*.csv
 *.mp4
 *.log
 outputs/
