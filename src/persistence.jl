@@ -42,6 +42,16 @@ db = init_database("curves.db")
 function init_database(db_path::String)
     db = SQLite.DB(db_path)
 
+    # Concorrência: a construção do banco leva mais de uma hora e o uso previsto
+    # é consultá-lo (get_rate, get_database_stats) enquanto ela roda. No modo
+    # journal padrão e com busy_timeout=0, uma única leitura concorrente faz o
+    # processo escritor abortar com "database is locked" e perder a execução.
+    # WAL permite leitores simultâneos ao escritor; busy_timeout faz o escritor
+    # esperar em vez de falhar.
+    SQLite.execute(db, "PRAGMA journal_mode=WAL")
+    SQLite.execute(db, "PRAGMA busy_timeout=30000")
+    SQLite.execute(db, "PRAGMA synchronous=NORMAL")
+
     # Cria tabela se não existir
     SQLite.execute(db, """
         CREATE TABLE IF NOT EXISTS nss_curves (
