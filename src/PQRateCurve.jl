@@ -57,7 +57,11 @@ export
     # Persistence (SQLite database)
     init_database, save_curve, save_curve_failure,
     load_curves, load_curve, curve_exists,
-    get_missing_dates, get_database_stats, get_rate
+    get_missing_dates, get_database_stats, get_rate,
+
+    # Cortes de Selic precificados pela curva (WIRP)
+    CopomMeeting, load_copom_calendar, current_selic, next_meetings,
+    effective_date, implied_selic_path
 
 # Include all module files
 include("constants.jl")
@@ -69,5 +73,6 @@ include("outlier_detection.jl")
 include("estimation.jl")
 include("persistence.jl")
 include("high_level_api.jl")
+include("copom.jl")
 
 end # module PQRateCurve
