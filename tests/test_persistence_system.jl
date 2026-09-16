@@ -12,7 +12,9 @@ println("=" ^ 60)
 # Remove banco de teste se existir
 test_db = "test_curves.db"
 if isfile(test_db)
-    rm(test_db)
+    for f in (test_db, test_db * "-wal", test_db * "-shm")
+        isfile(f) && rm(f; force=true)
+    end
     println("🗑️  Banco de teste anterior removido")
 end
 
@@ -110,9 +112,14 @@ println("      Sucessos: $(stats.successful_curves)")
 println("      Taxa de sucesso: $(stats.success_rate)%")
 println("      Período: $(stats.date_range[1]) → $(stats.date_range[2])")
 
-# Limpa
+# Limpa. Fecha a conexão antes de apagar: no Windows o arquivo não pode ser
+# removido enquanto houver handle aberto. O modo WAL cria os arquivos auxiliares
+# -wal e -shm, que também precisam sair.
 println("\n🗑️  Removendo banco de teste...")
-rm(test_db)
+close(db)
+for f in (test_db, test_db * "-wal", test_db * "-shm")
+    isfile(f) && rm(f; force=true)
+end
 
 println("\n" * "=" ^ 60)
 println("🎉 TODOS OS TESTES PASSARAM COM SUCESSO!")

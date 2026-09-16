@@ -595,6 +595,10 @@ function fit_curves_for_period(start_date::Date, end_date::Date;
         println("📊 Resumo: $successful/$(length(all_results)) sucessos ($(round(successful/length(all_results)*100, digits=1))%)")
     end
 
+    # Fecha a conexão aberta aqui: no Windows um handle aberto impede apagar ou
+    # mover o arquivo do banco, e quem chama não recebe a conexão para fechar.
+    db !== nothing && close(db)
+
     return all_results, config
 end
 
