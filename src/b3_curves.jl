@@ -55,10 +55,13 @@ function fetch_b3_curve(date::Date; curve::String = "PRE",
     if !isfile(path) || filesize(path) < 1000
         url = B3_TS_URL * "TS" * Dates.format(date, "yymmdd") * ".ex_"
         resp = HTTP.get(url; retries = 3, readtimeout = 120)
+        # Datas sem pregão (ou no futuro) devolvem uma página de erro curta com
+        # status 200. Gravá-la envenena o cache: a leitura seguinte encontra o
+        # arquivo, não rebaixa, e falha para sempre.
+        length(resp.body) < 1000 && throw(ArgumentError(
+            "Sem arquivo de curvas da B3 para $date (dia sem pregão ou data futura)"))
         write(path, resp.body)
     end
-    filesize(path) < 1000 && throw(ArgumentError(
-        "Arquivo de curvas da B3 vazio para $date (dia sem pregão?)"))
 
     txt = _read_taxaswap(path)
     return _parse_curve(txt, date, curve)
