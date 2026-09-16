@@ -14,7 +14,7 @@ Main features:
 """
 module PQRateCurve
 
-using Dates, Statistics, DataFrames, CSV, HTTP, ZipFile, LinearAlgebra
+using Dates, Statistics, DataFrames, CSV, HTTP, ZipFile, LinearAlgebra, BusinessDays
 using Random, Optim, TOML, JSON, SQLite
 
 # Export main functionality
@@ -61,7 +61,11 @@ export
 
     # Cortes de Selic precificados pela curva (WIRP)
     CopomMeeting, load_copom_calendar, current_selic, next_meetings,
-    effective_date, implied_selic_path
+    effective_date, implied_selic_path,
+
+    # Curva com degraus nas datas de reunião (bootstrap)
+    ZeroObservation, MeetingCurve, ltn_zero_rates, bootstrap_meeting_curve,
+    implied_path, zero_rate_curve
 
 # Include all module files
 include("constants.jl")
@@ -74,5 +78,6 @@ include("estimation.jl")
 include("persistence.jl")
 include("high_level_api.jl")
 include("copom.jl")
+include("meeting_curve.jl")
 
 end # module PQRateCurve
