@@ -17,3 +17,8 @@ tests/*.mp4
 *.swo
 *~
 .DS_Store
+
+# Banco de curvas (artefato gerado; ~3h de processamento)
+*.db
+*.db-wal
+*.db-shm
