@@ -206,11 +206,29 @@ function get_selic_rate(date::Date; max_fallback_days=10, verbose::Bool=true)
         if verbose; @info "API fetch failed for $(current_date), trying previous day..."; end
     end
 
-    # 4. If API fails, use the most recent value from the cache
+    # 4. Calendário do Copom: fonte autoritativa e offline. A meta Selic é
+    #    exatamente o que a reunião decide, então o calendário reproduz a série
+    #    432 sem depender da API — que sai do ar e cujo formato de consulta por
+    #    dia único vem falhando.
+    try
+        rate = current_selic(load_copom_calendar(), date) / 100
+        SELIC_CACHE[date] = rate
+        _save_selic_cache()
+        verbose && @info "Selic de $(date) obtida do calendário do Copom: $(round(rate*100, digits=2))% a.a."
+        return rate
+    catch e
+        @warn "Calendário do Copom indisponível para $(date): $(e)"
+    end
+
+    # 5. Último recurso: valor mais recente em cache. Perigoso — ancora a ponta
+    #    curta da curva numa Selic potencialmente de meses atrás, sem que o
+    #    ajuste denuncie. Por isso o aviso diz quão velho é o valor.
     if !isempty(SELIC_CACHE)
         latest_date = maximum(keys(SELIC_CACHE))
         rate = SELIC_CACHE[latest_date]
-        @warn "API fetch failed after $(max_fallback_days) days. Using most recent cached rate from $(latest_date)."
+        @warn "Selic de $(date) não obtida (API e calendário falharam). Usando valor de " *
+              "$(latest_date), $(Dates.value(date - latest_date)) dias mais antigo: " *
+              "$(round(rate*100, digits=2))% a.a. A ponta curta da curva ficará ancorada errada."
         return rate
     end
     
