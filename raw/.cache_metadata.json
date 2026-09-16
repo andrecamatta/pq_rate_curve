@@ -47,6 +47,12 @@
     "downloaded_at": "2025-08-01T17:05:46",
     "file_path": "raw/bacen_202401.zip"
   },
+  "202602": {
+    "file_size": 61779,
+    "last_date": "2026-02-27",
+    "downloaded_at": "2026-09-16T16:27:32",
+    "file_path": "raw\\bacen_202602.zip"
+  },
   "202012": {
     "file_size": 48255,
     "last_date": "2020-12-31",
@@ -71,6 +77,12 @@
     "downloaded_at": "2025-10-09T20:01:26",
     "file_path": "raw/bacen_201002.zip"
   },
+  "202609": {
+    "file_size": 52461,
+    "last_date": "2026-09-15",
+    "downloaded_at": "2026-09-16T16:27:33",
+    "file_path": "raw\\bacen_202609.zip"
+  },
   "202403": {
     "file_size": 49291,
     "last_date": "2024-03-28",
@@ -82,6 +94,12 @@
     "last_date": "2022-03-31",
     "downloaded_at": "2025-08-01T17:05:38",
     "file_path": "raw/bacen_202203.zip"
+  },
+  "202605": {
+    "file_size": 85724,
+    "last_date": "2026-05-29",
+    "downloaded_at": "2026-09-16T16:27:32",
+    "file_path": "raw\\bacen_202605.zip"
   },
   "201503": {
     "file_size": 41787,
@@ -131,6 +149,18 @@
     "downloaded_at": "2025-08-01T12:47:28",
     "file_path": "raw/bacen_202410.zip"
   },
+  "202603": {
+    "file_size": 77881,
+    "last_date": "2026-03-31",
+    "downloaded_at": "2026-09-16T16:27:32",
+    "file_path": "raw\\bacen_202603.zip"
+  },
+  "202604": {
+    "file_size": 78369,
+    "last_date": "2026-04-30",
+    "downloaded_at": "2026-09-16T16:27:32",
+    "file_path": "raw\\bacen_202604.zip"
+  },
   "201903": {
     "file_size": 41612,
     "last_date": "2019-03-29",
@@ -142,6 +172,12 @@
     "last_date": "2020-01-31",
     "downloaded_at": "2025-08-05T12:57:25",
     "file_path": "raw/bacen_202001.zip"
+  },
+  "202607": {
+    "file_size": 104783,
+    "last_date": "2026-07-31",
+    "downloaded_at": "2026-09-16T16:27:33",
+    "file_path": "raw\\bacen_202607.zip"
   },
   "201508": {
     "file_size": 40147,
@@ -382,6 +418,12 @@
     "last_date": "2025-03-31",
     "downloaded_at": "2025-08-03T14:42:13",
     "file_path": "raw/bacen_202503.zip"
+  },
+  "202601": {
+    "file_size": 65113,
+    "last_date": "2026-01-30",
+    "downloaded_at": "2026-09-16T16:26:56",
+    "file_path": "raw\\bacen_202601.zip"
   },
   "202308": {
     "file_size": 54381,
@@ -683,6 +725,12 @@
     "downloaded_at": "2025-05-07T00:09:04",
     "file_path": "raw/bacen_202301.zip"
   },
+  "202511": {
+    "file_size": 53571,
+    "last_date": "2025-11-28",
+    "downloaded_at": "2026-09-16T16:27:31",
+    "file_path": "raw\\bacen_202511.zip"
+  },
   "201308": {
     "file_size": 39617,
     "last_date": "2013-08-30",
@@ -844,6 +892,12 @@
     "last_date": "2004-04-30",
     "downloaded_at": "2025-10-09T19:58:06",
     "file_path": "raw/bacen_200404.zip"
+  },
+  "202606": {
+    "file_size": 101365,
+    "last_date": "2026-06-30",
+    "downloaded_at": "2026-09-16T16:27:33",
+    "file_path": "raw\\bacen_202606.zip"
   },
   "200402": {
     "file_size": 48013,
@@ -1007,6 +1061,12 @@
     "downloaded_at": "2025-08-05T12:56:15",
     "file_path": "raw/bacen_201904.zip"
   },
+  "202512": {
+    "file_size": 62995,
+    "last_date": "2025-12-31",
+    "downloaded_at": "2026-09-16T16:27:32",
+    "file_path": "raw\\bacen_202512.zip"
+  },
   "201507": {
     "file_size": 41979,
     "last_date": "2015-07-31",
@@ -1030,6 +1090,12 @@
     "last_date": "2024-12-31",
     "downloaded_at": "2025-08-01T12:47:28",
     "file_path": "raw/bacen_202412.zip"
+  },
+  "202510": {
+    "file_size": 64460,
+    "last_date": "2025-10-31",
+    "downloaded_at": "2026-09-16T16:27:28",
+    "file_path": "raw\\bacen_202510.zip"
   },
   "202105": {
     "file_size": 44982,
@@ -1108,6 +1174,12 @@
     "last_date": "2003-07-31",
     "downloaded_at": "2025-10-09T19:57:44",
     "file_path": "raw/bacen_200307.zip"
+  },
+  "202608": {
+    "file_size": 104835,
+    "last_date": "2026-08-31",
+    "downloaded_at": "2026-09-16T16:27:33",
+    "file_path": "raw\\bacen_202608.zip"
   },
   "202305": {
     "file_size": 55542,
