@@ -68,7 +68,8 @@ export
     implied_path, zero_rate_curve,
 
     # Curvas de referência da B3 (curva DI)
-    fetch_b3_curve, b3_curve_observations, B3_REFERENCE_CURVES
+    fetch_b3_curve, b3_curve_observations, B3_REFERENCE_CURVES,
+    interpolate_flat_forward
 
 # Include all module files
 include("constants.jl")

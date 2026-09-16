@@ -131,3 +131,34 @@ function b3_curve_observations(df::DataFrame; max_maturity::Union{Date,Nothing} 
     end
     return obs
 end
+
+# ============================================================================
+# Interpolação
+# ============================================================================
+
+"""
+    interpolate_flat_forward(df, business_days) -> Float64
+
+Taxa efetiva anual no prazo pedido, interpolada da curva da B3 pelo método
+flat-forward — padrão do mercado brasileiro. Interpola linearmente o logaritmo
+do fator de capitalização em dias úteis, o que equivale a supor forward
+constante entre vértices.
+
+Fora do intervalo da curva, estende o último forward disponível.
+"""
+function interpolate_flat_forward(df::DataFrame, business_days::Real)
+    business_days <= 0 && return df.rate[1]
+    du = df.business_days
+    business_days <= du[1] && return df.rate[1]
+    business_days >= du[end] && return df.rate[end]
+
+    i = searchsortedlast(du, business_days)
+    du[i] == business_days && return df.rate[i]
+
+    # log do fator acumulado em cada vértice
+    f1 = log(1 + df.rate[i] / 100) * du[i] / 252
+    f2 = log(1 + df.rate[i+1] / 100) * du[i+1] / 252
+    w = (business_days - du[i]) / (du[i+1] - du[i])
+    f = f1 + w * (f2 - f1)
+    return (exp(f * 252 / business_days) - 1) * 100
+end
