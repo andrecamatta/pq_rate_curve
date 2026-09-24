@@ -231,6 +231,25 @@ function is_cache_valid(year_month::String, target_date::Date, cache_config::Dic
     return true
 end
 
+"""
+    cache_is_stale(year_month, entry, target_date; max_age, now, current_ym) -> Bool
+
+Diz se o arquivo mensal do BACEN em cache precisa ser baixado de novo para
+servir `target_date`. Meses passados nunca ficam velhos: o arquivo está
+fechado. O do mês corrente cresce a cada pregão, então fica velho quando não
+cobre `target_date` — mas só depois de `max_age` desde o último download, para
+não rebaixar a cada chamada enquanto o BACEN ainda não publicou o dia.
+`entry` é o `CacheMetadata` do mês, ou `nothing` se não houver.
+"""
+function cache_is_stale(year_month::AbstractString, entry, target_date::Date;
+                        max_age::Period = Hour(24), now::DateTime = Dates.now(),
+                        current_ym::AbstractString = Dates.format(Date(now), "yyyymm"))
+    year_month < current_ym && return false
+    isnothing(entry) && return true
+    entry.last_date >= target_date && return false
+    return now - entry.downloaded_at > max_age
+end
+
 function download_zip_file(url::String, output_path::String, target_date::Date; force::Bool=false)
     raw_dir = "raw"
     !isdir(raw_dir) && mkdir(raw_dir)
@@ -253,18 +272,17 @@ function download_zip_file(url::String, output_path::String, target_date::Date; 
         end
     end
 
-    # Verifica se cache é válido (exceto se forçar redownload)
-    # TEMPORÁRIO: Desabilitando validação complexa de cache devido a problema de world age
-    # TODO: Resolver problema de world age com is_cache_valid
+    # Meses passados sempre usam o cache; o mês corrente só é rebaixado quando
+    # o arquivo não cobre a data pedida (ver cache_is_stale) ou por
+    # force_redownload.
     if !force && !isnothing(year_month) && isfile(full_path)
-        # Para meses passados, sempre usa cache
-        # Para mês corrente, força redownload se configurado
-        current_ym = Dates.format(today(), "yyyymm")
         force_redownload = get(cache_config, "force_redownload", false)
+        max_age = Hour(get(cache_config, "max_age_hours", 24))
+        entry = get(load_cache_metadata(), year_month, nothing)
+        last_date = isnothing(entry) ? Date(0) : entry.last_date
 
-        if year_month < current_ym || !force_redownload
-            metadata = load_cache_metadata()
-            last_date = haskey(metadata, year_month) ? metadata[year_month].last_date : Date(0)
+        past_month = year_month < Dates.format(today(), "yyyymm")
+        if past_month || (!force_redownload && !cache_is_stale(year_month, entry, target_date; max_age = max_age))
             println("📁 Usando arquivo local existente: $full_path (dados até $last_date)")
             return ZipFile.Reader(full_path)
         end
