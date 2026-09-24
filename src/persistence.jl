@@ -320,7 +320,7 @@ end
 
 """
     get_missing_dates(db::SQLite.DB, start_date::Date, end_date::Date;
-                     only_business_days::Bool=true) -> Vector{Date}
+                     only_business_days::Bool=true, retry_failed::Bool=true) -> Vector{Date}
 
 Retorna lista de datas faltantes no banco (que precisam ser processadas).
 
@@ -328,6 +328,9 @@ Retorna lista de datas faltantes no banco (que precisam ser processadas).
 - `db`: Conexão ao banco
 - `start_date`, `end_date`: Intervalo
 - `only_business_days`: Se true, filtra apenas dias úteis (seg-sex)
+- `retry_failed`: Se true, datas gravadas como falha também voltam como
+  faltantes. Uma falha pode ser transitória (arquivo do BACEN ainda sem o dia);
+  sem isso ela ficaria no banco para sempre.
 
 # Exemplo
 ```julia
@@ -336,7 +339,7 @@ println("Faltam processar: \$(length(missing)) dias")
 ```
 """
 function get_missing_dates(db::SQLite.DB, start_date::Date, end_date::Date;
-                          only_business_days::Bool=true)
+                          only_business_days::Bool=true, retry_failed::Bool=true)
     # Gera todas as datas do intervalo.
     # Usa o mesmo calendário de get_business_dates (BRSettlement): filtrar apenas
     # fim de semana deixaria ~10 feriados por ano na lista de pendências, que
@@ -350,7 +353,7 @@ function get_missing_dates(db::SQLite.DB, start_date::Date, end_date::Date;
 
     result = DBInterface.execute(db, """
         SELECT date FROM nss_curves
-        WHERE date >= ? AND date <= ?
+        WHERE date >= ? AND date <= ?$(retry_failed ? " AND success = 1" : "")
     """, [start_str, end_str])
 
     existing_dates = Set(Date(row.date) for row in result)
