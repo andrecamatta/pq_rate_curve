@@ -25,3 +25,6 @@ tests/*.mp4
 *.db
 *.db-wal
 *.db-shm
+
+# Cache dos arquivos TaxaSwap da B3 (baixado sob demanda por fetch_b3_curve)
+raw/b3_ts/
