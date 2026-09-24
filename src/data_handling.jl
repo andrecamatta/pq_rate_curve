@@ -348,6 +348,10 @@ function clean_bacen_data(df::DataFrame, start_date::Date, end_date::Date)
     
     # Filtrar pelo intervalo de datas exato [start_date, end_date]
     eltype(df.date) <: Date && filter!(row -> start_date <= row.date <= end_date, df)
+
+    # STRIPS de NTN-F não são o título inteiro (ver NTNF_STRIP_CODES)
+    hasproperty(df, :codigo) &&
+        filter!(row -> ismissing(row.codigo) || row.codigo ∉ NTNF_STRIP_CODES, df)
     
     return df
 end

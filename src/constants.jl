@@ -97,3 +97,12 @@ const NTNF_MATURITY_VALUE = 1050.0  # 1000 principal + 50 final coupon
 
 """Semi-annual coupon payment for NTN-F (5% = 10% p.a.)"""
 const NTNF_COUPON_VALUE = 50.0
+
+"""
+Códigos SELIC dos STRIPS de NTN-F: 950197 é cupom separado, 950198 é principal
+separado. Chegam no arquivo do BACEN com a mesma SIGLA "NTN-F" e o mesmo
+vencimento do título inteiro (950199), mas cada um paga um único fluxo — tratá-los
+como NTN-F cheia faz o ajuste precificar um cupom de ~R\$ 47 como título de
+~R\$ 1.000.
+"""
+const NTNF_STRIP_CODES = (950197, 950198)
