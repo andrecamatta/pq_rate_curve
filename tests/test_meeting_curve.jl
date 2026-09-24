@@ -77,14 +77,19 @@ end
         # Reprecifica o instrumento que existe
         @test maximum(abs, mc.fit_error_bps) < 0.5
 
-        # Degraus além do último vencimento não são identificados
-        @test mc.identified[1:3] == [true, true, true]
+        # Só o segmento que CONTÉM o vencimento é individualmente identificado.
+        # bounds = [16/09, 05/11, 10/12, 28/01, 18/03]; o título vence em 20/12,
+        # dentro do 3º segmento [10/12, 28/01).
+        @test mc.identified[1]            # 1º é a Selic fixada
+        @test mc.identified[3]
+        @test !mc.identified[2]
         @test !any(mc.identified[4:end])
 
-        # E a solução de mínimo movimento não cria saltos depois do último dado
+        # Depois do último vencimento nada restringe a curva, e a solução de
+        # mínimo movimento mantém o nível em vez de inventar corte
         path = implied_path(mc)
-        nao_id = .!path.identified
-        @test all(abs.(path.move_bps[nao_id]) .< 1e-6)
+        depois = path.meeting_date .> Date(2026, 12, 20)
+        @test all(abs.(path.move_bps[depois]) .< 1e-6)
     end
 
     @testset "curva plana devolve degraus planos" begin

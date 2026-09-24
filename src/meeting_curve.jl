@@ -151,7 +151,8 @@ function bootstrap_meeting_curve(ref_date::Date,
                                  observations::Vector{ZeroObservation},
                                  meetings::Vector{CopomMeeting};
                                  current_rate::Float64,
-                                 smoothness::Float64 = 1e-6)
+                                 smoothness::Float64 = 1e-6,
+                                 horizon_buffer::Month = Month(6))
 
     isempty(observations) && throw(ArgumentError("Nenhum instrumento observado em $ref_date"))
     isempty(meetings) && throw(ArgumentError("Nenhuma reunião fornecida"))
@@ -161,9 +162,14 @@ function bootstrap_meeting_curve(ref_date::Date,
     bounds = vcat(ref_date, [effective_date(m) for m in meetings])
     K = length(bounds)                       # número de degraus
 
-    # Só instrumentos que vencem depois da data de referência
-    obs = filter(o -> o.maturity > ref_date, observations)
-    isempty(obs) && throw(ArgumentError("Nenhum instrumento vencendo após $ref_date"))
+    # Só instrumentos que vencem depois da data de referência e dentro do
+    # horizonte. Sem o corte, títulos muito longos carregam todo o seu prazo no
+    # último segmento — que se estende indefinidamente — e distorcem o nível
+    # dele, produzindo um salto artificial na última reunião.
+    horizon = last(bounds) + horizon_buffer
+    obs = filter(o -> ref_date < o.maturity <= horizon, observations)
+    isempty(obs) && throw(ArgumentError(
+        "Nenhum instrumento entre $ref_date e $horizon"))
     N = length(obs)
 
     # Sistema A·f = y, com f em forward contínua
@@ -217,9 +223,19 @@ function bootstrap_meeting_curve(ref_date::Date,
         fit_error_bps[j] = (implied - o.rate / 100) * 10_000
     end
 
-    # Um degrau só é identificado se algum instrumento vence dentro ou depois
-    # dele — caso contrário seu nível vem inteiramente da penalidade
-    identified = [any(o -> o.maturity > bounds[k], obs) for k in 1:K]
+    # Identificação. Instrumentos ordenados por vencimento fixam a forward MÉDIA
+    # até cada vencimento; diferenças entre instrumentos consecutivos fixam a
+    # média entre dois vencimentos. Logo um degrau só é separável dos vizinhos
+    # se algum título vencer DENTRO do seu segmento. Como LTN vence
+    # trimestralmente e há 8 reuniões por ano, a maioria dos degraus fica apenas
+    # conjuntamente identificada — o nível individual vem da regularização.
+    identified = Vector{Bool}(undef, K)
+    for k in 1:K
+        seg_start = bounds[k]
+        seg_end = k < K ? bounds[k+1] : Date(9999, 12, 31)
+        identified[k] = any(o -> seg_start < o.maturity <= seg_end, obs)
+    end
+    identified[1] = true      # o 1º degrau é a Selic conhecida
 
     return MeetingCurve(ref_date, meetings, bounds, forward, obs,
                         fit_error_bps, identified, current_rate)
